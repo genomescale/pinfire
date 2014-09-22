@@ -11,7 +11,7 @@ import socket
 
 nan = float("nan")
 
-def accuracy(truth_path, sample_paths, derive_threshold, bhv_resolution, bhv_length, burn_in):
+def accuracy(truth_path, sample_paths, derive_trees_thresh, derive_post_thresh, bhv_resolution, bhv_length, burn_in):
 	print("Reading true tree...")
 	truth_newick = libpinfire.read_newick(truth_path)[0]
 	true_topology_newick = reset_tree_branch_lengths(truth_newick)
@@ -40,7 +40,7 @@ def accuracy(truth_path, sample_paths, derive_threshold, bhv_resolution, bhv_len
 	stp, std = libpinfire.sampled_topology_probabilities(ccp, ultrametric_samples)
 
 	print("Deriving probable topologies from conditional clades...")
-	dtp, dtd = libpinfire.derive_topology_probabilities(ccp, txo, derive_threshold)
+	dtp, dtd = libpinfire.best_topology_probabilities(ccp, txo, derive_trees_thresh, derive_post_thresh)
 
 	total_tpp = sum(tpp.values())
 	total_stp = sum(stp.values())
@@ -234,7 +234,8 @@ def unique_file_suffix():
 
 	return suffix
 
-derive_threshold = 10.0 ** -6
+derive_trees_thresh = 10**5
+derive_post_thresh = 0.95
 bhv_resolution = 1000
 bhv_length = 25
 burn_in = 7223
@@ -293,7 +294,7 @@ for r in true_replicates:
 								sample_paths.append(sample_path)
 
 							parameters = [r, s, i, k, l]
-							output = accuracy(truth_path, sample_paths, derive_threshold, bhv_resolution, bhv_length, burn_in)
+							output = accuracy(truth_path, sample_paths, derive_trees_thresh, derive_post_thresh, bhv_resolution, bhv_length, burn_in)
 							output_writer.writerow(parameters + output)
 							output_file.flush()
 

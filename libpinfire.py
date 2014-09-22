@@ -130,7 +130,7 @@ def elucidate_cc_split(parent_id, split_id):
 
 	return child1_id, child2_id
 
-def derive_topology_probabilities(cc_probabilities, taxon_order, probability_threshold = 0.0):
+def best_topology_probabilities(cc_probabilities, taxon_order, trees_threshold = 1, post_threshold = 1.0):
 	n_taxa = len(taxon_order)
 	n_bytes, remainder = divmod(n_taxa, 8)
 	if remainder > 0:
@@ -143,78 +143,95 @@ def derive_topology_probabilities(cc_probabilities, taxon_order, probability_thr
 	root_hash = root_hash_bytes.tostring()
 
 	star_tree = numpy.array([(root_hash, "", 1, 1.0)], dtype=derived_struct_format)
-	derived_topologies = [star_tree]
+	unresolved_topologies = [star_tree]
+	unresolved_inv_probs = [0.0]
 
-	all_resolved = False
-	first_step = True
-	while not all_resolved:
-		n_derived_topologies = len(derived_topologies)
-		if first_step:
-			first_step = False
-		else:
-			print "Derived %d probable topologies..." % (n_derived_topologies)
+	resolved_topologies = []
+	resolved_probabilities = []
 
-		all_resolved = True
-		for topology_i in reversed(range(n_derived_topologies)):
-			topology = derived_topologies[topology_i]
-			unresolved_nodes = numpy.flatnonzero(topology["f2"])
-			topology_probability = numpy.prod(topology["f3"])
-			if topology_probability > probability_threshold:
-				if len(unresolved_nodes) > 0:
-					all_resolved = False
+	resolved_posterior = 0.0
+	while len(unresolved_topologies) > 0 and len(resolved_topologies) < trees_threshold and resolved_posterior < post_threshold:
+		unresolved_topology = unresolved_topologies.pop(0)
+		unresolved_inv_probs = unresolved_inv_probs[1:]
 
-					unresolved_index = unresolved_nodes[0]
-					unresolved_hash = topology[unresolved_index]["f0"].tostring()
-					split_probabilities = cc_probabilities[unresolved_hash]
+		unresolved_nodes = numpy.flatnonzero(unresolved_topology["f2"])
+		unresolved_index = unresolved_nodes[0]
+		unresolved_hash = unresolved_topology[unresolved_index]["f0"].tostring()
+		split_probabilities = cc_probabilities[unresolved_hash]
 
-					for split_hash in split_probabilities:
-						split_probability = split_probabilities[split_hash]
-						if split_probability > 0.0:
-							child1_hash, child2_hash = elucidate_cc_split(unresolved_hash, split_hash)
+		new_unresolved_topologies = []
+		new_unresolved_inv_probs = []
+		for split_hash in split_probabilities:
+			split_probability = split_probabilities[split_hash]
+			if split_probability > 0.0:
+				child1_hash, child2_hash = elucidate_cc_split(unresolved_hash, split_hash)
+				child1_size = clade_size(child1_hash)
+				child2_size = clade_size(child2_hash)
 
-							if clade_size(child1_hash) > 1: # unresolved (more than one taxon)
-								child1_row = numpy.array([(child1_hash, "", 1, 1.0)], dtype=derived_struct_format)
-							else: # resolved (leaf/tip node)
-								child1_row = numpy.array([(child1_hash, "", 0, 1.0)], dtype=derived_struct_format)
+				if child1_size > 1: # unresolved (more than one taxon)
+					child1_row = numpy.array([(child1_hash, "", 1, 1.0)], dtype=derived_struct_format)
+				else: # resolved (leaf/tip node)
+					child1_row = numpy.array([(child1_hash, "", 0, 1.0)], dtype=derived_struct_format)
 
-							if clade_size(child2_hash) > 1: # unresolved (more than one taxon)
-								child2_row = numpy.array([(child2_hash, "", 1, 1.0)], dtype=derived_struct_format)
-							else: # resolved (leaf/tip node)
-								child2_row = numpy.array([(child2_hash, "", 0, 1.0)], dtype=derived_struct_format)
+				if child2_size > 1: # unresolved (more than one taxon)
+					child2_row = numpy.array([(child2_hash, "", 1, 1.0)], dtype=derived_struct_format)
+				else: # resolved (leaf/tip node)
+					child2_row = numpy.array([(child2_hash, "", 0, 1.0)], dtype=derived_struct_format)
 
-							new_topology = numpy.concatenate((topology, child1_row, child2_row))
+				if child1_size == 1 and child2_size == 1:
+					n_unresolved_nodes = len(unresolved_nodes) - 1
+				elif child1_size == 1 or child2_size == 1:
+					n_unresolved_nodes = len(unresolved_nodes)
+				else:
+					n_unresolved_nodes = len(unresolved_nodes) + 1
 
-							# record information to resolve node
-							new_topology[unresolved_index]["f1"] = split_hash
-							new_topology[unresolved_index]["f2"] = 0
-							new_topology[unresolved_index]["f3"] = split_probability
+				new_topology = numpy.concatenate((unresolved_topology, child1_row, child2_row))
 
-							derived_topologies.append(new_topology)
+				# record information to resolve node
+				new_topology[unresolved_index]["f1"] = split_hash
+				new_topology[unresolved_index]["f2"] = 0
+				new_topology[unresolved_index]["f3"] = split_probability
 
-					derived_topologies.pop(topology_i)
+				if n_unresolved_nodes == 0:
+					new_topology_probability = numpy.prod(new_topology["f3"])
+					resolved_topologies.append(new_topology)
+					resolved_probabilities.append(new_topology_probability)
+					resolved_posterior += new_topology_probability
+				else:
+					new_topology_inv_prob = 1.0 - numpy.prod(new_topology["f3"])
+					new_unresolved_topologies.append(new_topology)
+					new_unresolved_inv_probs.append(new_topology_inv_prob)
 
-			else:
-				derived_topologies.pop(topology_i)
+		unresolved_ranks = numpy.searchsorted(unresolved_inv_probs, new_unresolved_inv_probs)
+		i = 0
+		for rank in unresolved_ranks:
+			unresolved_topologies.insert(rank, new_unresolved_topologies[i])
+			unresolved_inv_probs.insert(rank, new_unresolved_inv_probs[i])
+
+			i += 1
+
+		print(len(unresolved_topologies), len(resolved_topologies), resolved_posterior)
 
 	print("Computing newick strings and tree probabilities for derived topologies...")
 	derived_topology_probabilities = {}
 	derived_topology_newick = {}
-	for dt in derived_topologies:
-		dt_hash = numpy.sort(dt["f0"]).tostring()
-		dt_probability = numpy.prod(dt["f3"])
+	for i in range(len(resolved_topologies)):
+		topology = resolved_topologies[i]
+		probability = resolved_probabilities[i]
+		topology_hash = numpy.sort(topology["f0"]).tostring()
 
 		splits = {}
-		for node in dt:
+		for node in topology:
 			parent_id = node["f0"]
 			split_id = node["f1"]
 			splits[parent_id] = split_id
 
 		tree_model = ete2.Tree()
 		derive_tree_from_splits(tree_model, root_hash, taxon_order, splits)
-		dt_newick = tree_model.write(format = 9)
+		newick = tree_model.write(format = 9)
 
-		derived_topology_probabilities[dt_hash] = dt_probability
-		derived_topology_newick[dt_hash] = dt_newick
+		derived_topology_probabilities[topology_hash] = probability
+		derived_topology_newick[topology_hash] = newick
 
 	return derived_topology_probabilities, derived_topology_newick
 
