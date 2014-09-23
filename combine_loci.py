@@ -15,6 +15,7 @@ def accuracy(truth_path, sample_paths, derive_trees_thresh, derive_post_thresh, 
 	print("Reading true tree...")
 	truth_newick = libpinfire.read_newick(truth_path)[0]
 	true_topology_newick = reset_tree_branch_lengths(truth_newick)
+	truth_ultrametric = libpinfire.UltrametricSample(true_topology_newick)
 
 	ultrametric_samples = []
 	for sample_path in sample_paths:
@@ -41,6 +42,7 @@ def accuracy(truth_path, sample_paths, derive_trees_thresh, derive_post_thresh, 
 
 	print("Deriving probable topologies from conditional clades...")
 	dtp, dtd = libpinfire.best_topology_probabilities(ccp, txo, derive_trees_thresh, derive_post_thresh)
+	d_prob_value = libpinfire.sampled_topology_probabilities(ccp, [truth_ultrametric])
 
 	total_tpp = sum(tpp.values())
 	total_stp = sum(stp.values())
@@ -53,30 +55,30 @@ def accuracy(truth_path, sample_paths, derive_trees_thresh, derive_post_thresh, 
 	if n_tpp > 0:
 		print("Calculating precision and bias of sampled, directly inferred topology probabilities...")
 		tp_sd, tp_mean_distance = precision_and_bias(tpp, tpd, true_topology_newick, bhv_resolution, bhv_length)
-		print("Calculating minimum HPD interval & clade credibility of true tree using sampled, directly inferred topology probabilities...")
-		t_prob_rank, t_prob_value, t_cc_rank, t_cc_value = truth_prob_and_cred(tpp, tpd, truth_newick, txo)
+		print("Calculating probability and rank of true tree using sampled, directly inferred topology probabilities...")
+		t_prob_rank, t_prob_value = find_truth_probability(tpp, tpd, truth_newick, txo)
 	else:
-		tp_sd, tp_mean_distance, t_prob_rank, t_prob_value, t_cc_rank, t_cc_value = (nan, nan, nan, nan, nan, nan)
+		tp_sd, tp_mean_distance, t_prob_rank, t_prob_value = (nan, nan, nan, nan)
 
 	if n_stp > 0:
 		print("Calculating precision and bias of sampled, conditional-clade derived topology probabilities...")
 		st_sd, st_mean_distance = precision_and_bias(stp, std, true_topology_newick, bhv_resolution, bhv_length)
-		print("Calculating HPD interval & clade credibility of true tree using sampled, conditional-clade derived topology probabilities...")
-		s_prob_rank, s_prob_value, s_cc_rank, s_cc_value = truth_prob_and_cred(stp, std, truth_newick, txo)
+		print("Calculating probability and rank of true tree using sampled, conditional-clade derived topology probabilities...")
+		s_prob_rank, s_prob_value = find_truth_probability(stp, std, truth_newick, txo)
 	else:
-		st_sd, st_mean_distance, s_prob_rank, s_prob_value, s_cc_rank, s_cc_value = (nan, nan, nan, nan, nan, nan)
+		st_sd, st_mean_distance, s_prob_rank, s_prob_value = (nan, nan, nan, nan)
 
 	if n_dtp > 0:
 		print("Calculating precision and bias of conditional-clade derived topology probabilities...")
 		dt_sd, dt_mean_distance = precision_and_bias(dtp, dtd, true_topology_newick, bhv_resolution, bhv_length)
-		print("Calculating HPD interval & clade credibility of true tree using conditional-clade derived topology probabilities...")
-		d_prob_rank, d_prob_value, d_cc_rank, d_cc_value = truth_prob_and_cred(dtp, dtd, truth_newick, txo)
+		print("Calculating probability and rank of true tree using conditional-clade derived topology probabilities...")
+		d_prob_rank, rubbish = find_truth_probability(dtp, dtd, truth_newick, txo)
 	else:
-		dt_sd, dt_mean_distance, d_prob_rank, d_prob_value, d_cc_rank, d_cc_value = (nan, nan, nan, nan, nan, nan)
+		dt_sd, dt_mean_distance, d_prob_rank = (nan, nan, nan)
 
-	results  = [n_tpp, total_tpp, tp_sd, tp_mean_distance, t_prob_rank, t_prob_value, t_cc_rank, t_cc_value]
-	results += [n_stp, total_stp, st_sd, st_mean_distance, s_prob_rank, s_prob_value, s_cc_rank, s_cc_value]
-	results += [n_dtp, total_dtp, dt_sd, dt_mean_distance, d_prob_rank, d_prob_value, d_cc_rank, d_cc_value]
+	results  = [n_tpp, total_tpp, tp_sd, tp_mean_distance, t_prob_rank, t_prob_value]
+	results += [n_stp, total_stp, st_sd, st_mean_distance, s_prob_rank, s_prob_value]
+	results += [n_dtp, total_dtp, dt_sd, dt_mean_distance, d_prob_rank, d_prob_value]
 
 	return results
 
@@ -96,33 +98,20 @@ def precision_and_bias(topology_probabilities, topology_strings, true_topology_n
 
 	return sample_sd, sample_mean_distance
 
-def truth_prob_and_cred(topology_probabilities, topology_strings, truth_newick, taxon_order):
+def find_truth_probability(topology_probabilities, topology_strings, truth_newick, taxon_order):
 	prob_ranks = libpinfire.rank_discrete(topology_probabilities)
 
 	truth_array = libpinfire.generate_tree_array(truth_newick, taxon_order)
 	truth_hash = truth_array["f0"].tostring()
 
 	if truth_hash in prob_ranks:
-		clade_credibilities = libpinfire.calculate_clade_credibility(topology_probabilities, topology_strings, topology_strings, taxon_order)
-
-		cred_ranks = libpinfire.rank_discrete(clade_credibilities)
-
 		truth_prob_rank  = prob_ranks[truth_hash]
 		truth_prob_value = topology_probabilities[truth_hash]
-
-		truth_cc_rank  = cred_ranks[truth_hash]
-		truth_cc_value = clade_credibilities[truth_hash]
 	else:
-		truth_strings = {truth_hash: truth_newick}
-		clade_credibilities = libpinfire.calculate_clade_credibility(topology_probabilities, topology_strings, truth_strings, taxon_order)
-
 		truth_prob_rank  = nan
 		truth_prob_value = 0.0
 
-		truth_cc_rank  = nan
-		truth_cc_value = clade_credibilities[truth_hash]
-
-	return truth_prob_rank, truth_prob_value, truth_cc_rank, truth_cc_value
+	return truth_prob_rank, truth_prob_value
 
 def reset_branch_lengths(all_trees, new_branch_length = 1.0):
 	reset_trees = {}
@@ -248,9 +237,9 @@ output_file = open(output_path, "w")
 output_writer = csv.writer(output_file)
 
 output_header  = ["replicate", "n_species", "individuals_per_species", "n_partitions", "loci_per_partition"]
-output_header += [ "direct_n_topologies",  "direct_total_probability",  "direct_spread",  "direct_bias",  "direct_truth_prob_rank",  "direct_truth_probability",  "direct_truth_cred_rank",  "direct_truth_credibility"]
-output_header += ["sampled_n_topologies", "sampled_total_probability", "sampled_spread", "sampled_bias", "sampled_truth_prob_rank", "sampled_truth_probability", "sampled_truth_cred_rank", "sampled_truth_credibility"]
-output_header += ["derived_n_topologies", "derived_total_probability", "derived_spread", "derived_bias", "derived_truth_prob_rank", "derived_truth_probability", "derived_truth_cred_rank", "derived_truth_credibility"]
+output_header += [ "direct_n_topologies",  "direct_total_probability",  "direct_spread",  "direct_bias",  "direct_truth_prob_rank",  "direct_truth_probability"]
+output_header += ["sampled_n_topologies", "sampled_total_probability", "sampled_spread", "sampled_bias", "sampled_truth_prob_rank", "sampled_truth_probability"]
+output_header += ["derived_n_topologies", "derived_total_probability", "derived_spread", "derived_bias", "derived_truth_prob_rank", "derived_truth_probability"]
 
 output_writer.writerow(output_header)
 
@@ -286,16 +275,15 @@ for r in true_replicates:
 						l = 2**l_e
 						k = 2**k_e
 
-						if (l * k) <= max_loci:
-							sample_paths = []
-							for p in range(k):
-								sample_filename = "species_%s_%02dk_%03dl_%02dp.newick" % (simulation, k, l, p)
-								sample_path = os.path.join(simulation_folder, sample_filename)
-								sample_paths.append(sample_path)
+						sample_paths = []
+						for p in range(k):
+							sample_filename = "species_%s_%02dk_%03dl_%02dp.newick" % (simulation, k, l, p)
+							sample_path = os.path.join(simulation_folder, sample_filename)
+							sample_paths.append(sample_path)
 
-							parameters = [r, s, i, k, l]
-							output = accuracy(truth_path, sample_paths, derive_trees_thresh, derive_post_thresh, bhv_resolution, bhv_length, burn_in)
-							output_writer.writerow(parameters + output)
-							output_file.flush()
+						parameters = [r, s, i, k, l]
+						output = accuracy(truth_path, sample_paths, derive_trees_thresh, derive_post_thresh, bhv_resolution, bhv_length, burn_in)
+						output_writer.writerow(parameters + output)
+						output_file.flush()
 
 output_file.close()

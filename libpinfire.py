@@ -498,42 +498,6 @@ def calculate_node_ids(children_a, children_b, taxon_order):
 
 	return parent_id, split_id
 
-def calculate_clade_credibility(sample_probabilities, sample_strings, prediction_strings, taxon_order):
-	flat_topology_hashes = []
-	flat_topology_probabilities = []
-	flat_topology_strings = []
-
-	clade_probabilities = {}
-	for topology_hash, topology_newick in sample_strings.items():
-		topology_probability = sample_probabilities[topology_hash]
-		topology_array = generate_tree_array(topology_newick, taxon_order)
-		topology_clades = topology_array["f0"]
-
-		for clade_id in topology_clades:
-			if clade_id in clade_probabilities:
-				clade_probabilities[clade_id] += topology_probability
-			else:
-				clade_probabilities[clade_id] = topology_probability
-
-	prediction_credibilities = {}
-	for prediction_hash, prediction_newick in prediction_strings.items():
-		prediction_array = generate_tree_array(prediction_newick, taxon_order)
-		prediction_clades = prediction_array["f0"]
-
-		prediction_clade_probs = []
-		for clade_id in prediction_clades:
-			if clade_id in clade_probabilities:
-				clade_probability = clade_probabilities[clade_id]
-			else:
-				clade_probability = 0.0
-
-			prediction_clade_probs.append(clade_probability)
-
-		prediction_clade_credibility = numpy.product(prediction_clade_probs)
-		prediction_credibilities[prediction_hash] = prediction_clade_credibility
-
-	return prediction_credibilities
-
 def rank_discrete(discrete_probabilities):
 	flat_discrete_hashes = []
 	flat_discrete_probs = []
