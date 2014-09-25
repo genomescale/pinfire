@@ -57,7 +57,7 @@ class DiscreteFrequencies():
 		self.feature_struct_format = ",".join(column_dtypes)
 		self.feature_frequencies = numpy.array(frequencies_table, self.feature_struct_format)
 
-def sampled_topology_probabilities(cc_probabilities, tree_samples):
+def defined_topology_probabilities(cc_probabilities, tree_samples):
 	n_partitions = len(tree_samples)
 	topology_probabilities = {}
 	topology_strings = {}
@@ -212,7 +212,6 @@ def best_topology_probabilities(cc_probabilities, taxon_order, trees_threshold =
 
 		print(len(unresolved_topologies), len(resolved_topologies), resolved_posterior)
 
-	print("Computing newick strings and tree probabilities for derived topologies...")
 	derived_topology_probabilities = {}
 	derived_topology_newick = {}
 	for i in range(len(resolved_topologies)):
