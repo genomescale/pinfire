@@ -130,6 +130,18 @@ def elucidate_cc_split(parent_id, split_id):
 
 	return child1_id, child2_id
 
+def log_n_topologies(n_taxa):
+	double_factorial_of = (2 * n_taxa) - 3
+
+	if double_factorial_of % 2 == 0:
+		k = double_factorial_of / 2
+		double_factorial = k * math.log(2) + math.lgamma(k + 1)
+	else:
+		k = (double_factorial_of + 1) / 2
+		double_factorial = math.lgamma((2 * k) + 1) - k * math.log(2) - math.lgamma(k + 1)
+
+	return double_factorial
+
 def best_topology_probabilities(cc_probabilities, taxon_order, trees_threshold = 1, post_threshold = 1.0):
 	n_taxa = len(taxon_order)
 	n_bytes, remainder = divmod(n_taxa, 8)
@@ -138,10 +150,7 @@ def best_topology_probabilities(cc_probabilities, taxon_order, trees_threshold =
 
 	derived_struct_format = "a%d,a%d,u1,f8" % (n_bytes, n_bytes)
 
-	root_hash_bits = numpy.ones(n_taxa, dtype = numpy.uint8)
-	root_hash_bytes = numpy.packbits(root_hash_bits)
-	root_hash = root_hash_bytes.tostring()
-
+	root_hash = calculate_root_hash(n_taxa)
 	star_tree = numpy.array([(root_hash, "", 1, 1.0)], dtype=derived_struct_format)
 	unresolved_topologies = [star_tree]
 	unresolved_inv_probs = [0.0]
@@ -178,29 +187,23 @@ def best_topology_probabilities(cc_probabilities, taxon_order, trees_threshold =
 				else: # resolved (leaf/tip node)
 					child2_row = numpy.array([(child2_hash, "", 0, 1.0)], dtype=derived_struct_format)
 
-				if child1_size == 1 and child2_size == 1:
-					n_unresolved_nodes = len(unresolved_nodes) - 1
-				elif child1_size == 1 or child2_size == 1:
-					n_unresolved_nodes = len(unresolved_nodes)
-				else:
-					n_unresolved_nodes = len(unresolved_nodes) + 1
-
 				new_topology = numpy.concatenate((unresolved_topology, child1_row, child2_row))
-
-				# record information to resolve node
 				new_topology[unresolved_index]["f1"] = split_hash
 				new_topology[unresolved_index]["f2"] = 0
 				new_topology[unresolved_index]["f3"] = split_probability
 
+				n_unresolved_nodes = numpy.sum(new_topology["f2"])
 				if n_unresolved_nodes == 0:
 					new_topology_probability = numpy.prod(new_topology["f3"])
 					resolved_topologies.append(new_topology)
 					resolved_probabilities.append(new_topology_probability)
 					resolved_posterior += new_topology_probability
 				else:
-					new_topology_inv_prob = 1.0 - numpy.prod(new_topology["f3"])
+					new_topology_probability = numpy.prod(new_topology["f3"])
+					new_topology_inv_probability = 1.0 - new_topology_probability
+
 					new_unresolved_topologies.append(new_topology)
-					new_unresolved_inv_probs.append(new_topology_inv_prob)
+					new_unresolved_inv_probs.append(new_topology_inv_probability)
 
 		unresolved_ranks = numpy.searchsorted(unresolved_inv_probs, new_unresolved_inv_probs)
 		i = 0
@@ -517,3 +520,123 @@ def rank_discrete(discrete_probabilities):
 		discrete_ranking[discrete_hash] = discrete_rank
 
 	return discrete_ranking
+
+def reverse_cc_probabilities(cc_probabilities):
+	reverse_ccp = {}
+	for parent_id in cc_probabilities:
+		for split_id in cc_probabilities[parent_id]:
+			cc_probability = cc_probabilities[parent_id][split_id]
+			child1_hash, child2_hash = elucidate_cc_split(parent_id, split_id)
+
+			if child1_hash in reverse_ccp:
+				reverse_ccp[child1_hash][parent_id] = cc_probability
+			else:
+				reverse_ccp[child1_hash] = {parent_id: cc_probability}
+
+			if child2_hash in reverse_ccp:
+				reverse_ccp[child2_hash][parent_id] = cc_probability
+			else:
+				reverse_ccp[child2_hash] = {parent_id: cc_probability}
+
+	return reverse_ccp
+
+def derive_clade_probabilities(clade_id, n_taxa, reverse_ccp):
+	n_bytes, remainder = divmod(n_taxa, 8)
+	if remainder > 0:
+		n_bytes += 1
+
+	derived_struct_format = "a%d,f8" % (n_bytes)
+
+	root_hash = calculate_root_hash(n_taxa)
+
+	target_clade = numpy.array([(clade_id, 1.0)], dtype=derived_struct_format)
+	paths_to_root = [target_clade]
+
+	target_clade_probability = 0.0
+	while len(paths_to_root) > 0:
+		incomplete_path = paths_to_root.pop(0)
+		incomplete_path_head = incomplete_path[0]
+		incomplete_path_hash = incomplete_path_head["f0"].tostring()
+		possible_parents = reverse_ccp[incomplete_path_hash]
+
+		for parent_hash in possible_parents:
+			split_probability = possible_parents[parent_hash]
+			if split_probability > 0.0:
+				parent_row = numpy.array([(parent_hash, split_probability)], dtype=derived_struct_format)
+				new_path = numpy.concatenate((parent_row, incomplete_path))
+
+				if parent_hash == root_hash:
+					path_probability = numpy.prod(new_path["f1"])
+					target_clade_probability += path_probability
+				else:
+					paths_to_root.append(new_path)
+
+	return target_clade_probability
+
+def add_derived_probabilities(newick_strings, taxon_order, ccp):
+	n_taxa = len(taxon_order)
+	reverse_ccp = reverse_cc_probabilities(ccp)
+
+	annotated_topologies = {}
+	for topology_hash, topology_newick in newick_strings.items():
+		root_node = ete2.Tree(topology_newick)
+		for node in root_node.get_descendants():
+			if not node.is_leaf():
+				child1, child2 = node.get_children()
+				child1_clade = set(child1.get_leaf_names())
+				child2_clade = set(child2.get_leaf_names())
+
+				parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, taxon_order)
+				clade_probability = derive_clade_probabilities(parent_id, n_taxa, reverse_ccp)
+				node.support = clade_probability
+
+		annotated_newick = root_node.write(format = 2)
+		annotated_topologies[topology_hash] = annotated_newick
+
+	return annotated_topologies
+
+def calculate_root_hash(n_taxa):
+	root_hash_bits = numpy.ones(n_taxa, dtype = numpy.uint8)
+	root_hash_bytes = numpy.packbits(root_hash_bits)
+	root_hash = root_hash_bytes.tostring()
+
+	return root_hash
+
+def nonzero_derived_topologies(ccp, taxon_order):
+	n_taxa = len(taxon_order)
+	reverse_ccp = reverse_cc_probabilities(ccp)
+	clades_by_size = []
+	n_subtrees = {}
+
+	for i in range(n_taxa - 2):
+		clades_by_size.append(set())
+
+	for parent_id in ccp:
+		parent_size = clade_size(parent_id)
+		if parent_size > 2:
+			clades_by_size[parent_size - 3].add(parent_id)
+
+	for i in range(n_taxa - 2):
+		for parent_id in clades_by_size[i]:
+			n_parent_subtrees = 0
+			for split_id in ccp[parent_id]:
+				if ccp[parent_id][split_id] > 0.0:
+					child1_id, child2_id = elucidate_cc_split(parent_id, split_id)
+
+					n_split_subtrees = 1
+					child1_size = clade_size(child1_id)
+					if child1_size > 2:
+						n_split_subtrees = n_split_subtrees * n_subtrees[child1_id]
+
+					child2_size = clade_size(child2_id)
+					if child2_size > 2:
+						n_split_subtrees = n_split_subtrees * n_subtrees[child2_id]
+
+					n_parent_subtrees += n_split_subtrees
+
+			n_subtrees[parent_id] = n_parent_subtrees
+
+	root_id = calculate_root_hash(n_taxa)
+	n_root_topologies = n_subtrees[root_id]
+
+	return n_root_topologies
