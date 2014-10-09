@@ -130,18 +130,6 @@ def elucidate_cc_split(parent_id, split_id):
 
 	return child1_id, child2_id
 
-def log_n_topologies(n_taxa):
-	double_factorial_of = (2 * n_taxa) - 3
-
-	if double_factorial_of % 2 == 0:
-		k = double_factorial_of / 2
-		double_factorial = k * math.log(2) + math.lgamma(k + 1)
-	else:
-		k = (double_factorial_of + 1) / 2
-		double_factorial = math.lgamma((2 * k) + 1) - k * math.log(2) - math.lgamma(k + 1)
-
-	return double_factorial
-
 def best_topology_probabilities(cc_probabilities, taxon_order, trees_threshold = 1, post_threshold = 1.0):
 	n_taxa = len(taxon_order)
 	n_bytes, remainder = divmod(n_taxa, 8)
@@ -364,7 +352,7 @@ def log_labelled_histories(n_taxa):
 
 def log_subclade_rankings(n_taxa_1, n_taxa_2):
 	lsr  = 0.0
-	lsr += math.lgamma(n_taxa_1 + n_taxa_2 - 1)
+	lsr += math.lgamma(n_taxa_1 + n_taxa_2 + 1)
 	lsr -= math.lgamma(n_taxa_1)
 	lsr -= math.lgamma(n_taxa_2)
 	return lsr
