@@ -352,7 +352,7 @@ def log_labelled_histories(n_taxa):
 
 def log_subclade_rankings(n_taxa_1, n_taxa_2):
 	lsr  = 0.0
-	lsr += math.lgamma(n_taxa_1 + n_taxa_2 + 1)
+	lsr += math.lgamma(n_taxa_1 + n_taxa_2 - 1)
 	lsr -= math.lgamma(n_taxa_1)
 	lsr -= math.lgamma(n_taxa_2)
 	return lsr
