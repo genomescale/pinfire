@@ -1,8 +1,8 @@
 #!/usr/bin/python2.7
 
-PROGRAM_VERSION = "summary_trees.py, part of 'pinfire' preview 1"
+PROGRAM_VERSION = "summary_trees.py, part of 'scculs' preview 1"
 
-import libpinfire
+import libscculs
 import argparse
 import os
 import ete2
@@ -64,34 +64,34 @@ sample_burn_in = n_burn_in[0]
 
 ultrametric_samples = []
 print "Reading ultrametric sample %s..." % (sample_path)
-sample_newick = libpinfire.read_newick(sample_path)[sample_burn_in:]
-sample_ultrametric = libpinfire.UltrametricSample(sample_newick)
+sample_newick = libscculs.read_newick(sample_path)[sample_burn_in:]
+sample_ultrametric = libscculs.UltrametricSample(sample_newick)
 ultrametric_samples = [sample_ultrametric]
 
 print("Counting topologies and conditional clades...")
-tpf, tpd, ccf, ccd = libpinfire.count_topologies(ultrametric_samples)
+tpf, tpd, ccf, ccd = libscculs.count_topologies(ultrametric_samples)
 txo = ultrametric_samples[0].taxon_order
 print("Calculating topology probabilities...")
-tpp = libpinfire.calculate_discrete_probabilities(tpf, libpinfire.yule_log_prior, tpd)
+tpp = libscculs.calculate_discrete_probabilities(tpf, libscculs.yule_log_prior, tpd)
 
 print("Calculating conditional clade probabilities...")
 ccp = {}
 for cid in ccf:
 	conditional_frequencies = ccf[cid]
 	conditional_data = ccd[cid]
-	ccp[cid] = libpinfire.calculate_discrete_probabilities(conditional_frequencies, libpinfire.cc_yule_log_prior, conditional_data)
+	ccp[cid] = libscculs.calculate_discrete_probabilities(conditional_frequencies, libscculs.cc_yule_log_prior, conditional_data)
 
 print("Calculating topology probabilities from conditional clade probabilities...")
-stp, std = libpinfire.defined_topology_probabilities(ccp, ultrametric_samples)
+stp, std = libscculs.defined_topology_probabilities(ccp, ultrametric_samples)
 
 print("Deriving probable topologies from conditional clades...")
-dtp, dtd = libpinfire.best_topology_probabilities(ccp, txo, derive_trees_thresh, derive_post_thresh)
+dtp, dtd = libscculs.best_topology_probabilities(ccp, txo, derive_trees_thresh, derive_post_thresh)
 
 print("Counting number of derived topologies")
-print(libpinfire.nonzero_derived_topologies(ccp, txo))
+print(libscculs.nonzero_derived_topologies(ccp, txo))
 
 if args.newick_output:
-	annotated_topologies = libpinfire.add_derived_probabilities(dtd, txo, ccp)
+	annotated_topologies = libscculs.add_derived_probabilities(dtd, txo, ccp)
 	for t_hash, ns in annotated_topologies.items():
 		t_prob = dtp[t_hash]
 		print(ns)
