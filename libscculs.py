@@ -5,7 +5,7 @@ import math
 order_differs_error = Exception("The set of taxa differs between tree samples, so they may not be directly compared")
 
 class UltrametricSample():
-	def __init__(self, newick_strings):
+	def __init__(self, newick_strings, calibration_taxon, calibration_date):
 		self.taxon_order = []
 		self.newick_strings = []
 		self.tree_arrays = []
@@ -22,6 +22,8 @@ class UltrametricSample():
 			if i == 0:
 				taxa = tree.get_leaf_names()
 				self.taxon_order = sorted(taxa)
+				if calibration_taxon == "":
+					calibration_taxon = self.taxon_order[0]
 
 			tree_array = generate_tree_array(ns, self.taxon_order)
 
@@ -37,62 +39,48 @@ class DiscreteFrequencies():
 		n_features = len(frequency_labels)
 
 		first_feature = frequency_labels[0]
-		n_partitions = 0
 		max_label_size = 0
 
 		frequencies_table = []
 		for i in range(n_features):
 			feature = frequency_labels[i]
-			counts = frequencies[feature]
-			feature_frequencies = tuple([feature] + counts)
+			count = frequencies[feature]
+			feature_frequencies = tuple(feature, count)
 			frequencies_table.append(feature_frequencies)
-
-			if i == 0:
-				n_partitions = len(counts)
 
 			if len(feature) > max_label_size:
 				max_label_size = len(feature)
 
-		column_dtypes = ["a" + str(max_label_size)] + ["u8"] * n_partitions
-		self.feature_struct_format = ",".join(column_dtypes)
+		self.feature_struct_format = "a" + str(max_label_size) + "u8"
 		self.feature_frequencies = numpy.array(frequencies_table, self.feature_struct_format)
 
-def defined_topology_probabilities(cc_probabilities, tree_samples):
-	n_partitions = len(tree_samples)
+def defined_topology_probabilities(cc_probabilities, ts):
 	topology_probabilities = {}
 	topology_strings = {}
 
-	first_taxon_order = []
-	for i in range(n_partitions):
-		ts = tree_samples[i]
-		if i == 0:
-			first_taxon_order = ts.taxon_order[:]
-		elif first_taxon_order != ts.taxon_order:
-			raise order_differs_error
+	n_trees = len(ts.tree_arrays)
+	for j in range(n_trees):
+		tree_array = ts.tree_arrays[j]
+		newick_string = ts.newick_strings[j]
+		topology_hash = tree_array["f0"].tostring()
 
-		n_trees = len(ts.tree_arrays)
-		for j in range(n_trees):
-			tree_array = ts.tree_arrays[j]
-			newick_string = ts.newick_strings[j]
-			topology_hash = tree_array["f0"].tostring()
+		if topology_hash not in topology_probabilities:
+			split_probabilities = []
 
-			if topology_hash not in topology_probabilities:
-				split_probabilities = []
+			topology_tree = ete2.Tree(newick_string)
+			topology_string = topology_tree.write(format = 9) # strip branch lengths
+			topology_strings[topology_hash] = topology_string
 
-				topology_tree = ete2.Tree(newick_string)
-				topology_string = topology_tree.write(format = 9) # strip branch lengths
-				topology_strings[topology_hash] = topology_string
+			for node in tree_array:
+				parent_id = node[0]
+				split_id = node[1]
 
-				for node in tree_array:
-					parent_id = node[0]
-					split_id = node[1]
+				n_node_taxa = clade_size(parent_id)
+				if n_node_taxa > 2:
+					split_probability = cc_probabilities[parent_id][split_id]
+					split_probabilities.append(split_probability)
 
-					n_node_taxa = clade_size(parent_id)
-					if n_node_taxa > 2:
-						split_probability = cc_probabilities[parent_id][split_id]
-						split_probabilities.append(split_probability)
-
-				topology_probabilities[topology_hash] = numpy.product(split_probabilities)
+			topology_probabilities[topology_hash] = numpy.product(split_probabilities)
 
 	return topology_probabilities, topology_strings
 
@@ -298,50 +286,41 @@ def clade_taxon_names(clade_hash, taxon_order):
 
 	return taxon_names
 
-def count_topologies(tree_samples):
-	n_partitions = len(tree_samples)
+def count_topologies(ts):
 	topology_counts = {}
 	topology_strings = {}
 	cc_counts = {}
 	cc_id_pairs = {}
 
-	first_taxon_order = []
-	for i in range(n_partitions):
-		ts = tree_samples[i]
-		if i == 0:
-			first_taxon_order = ts.taxon_order[:]
-		elif first_taxon_order != ts.taxon_order:
-			raise order_differs_error
+	n_trees = len(ts.tree_arrays)
+	for j in range(n_trees):
+		tree_array = ts.tree_arrays[j]
+		newick_string = ts.newick_strings[j]
+		topology_hash = tree_array["f0"].tostring()
 
-		n_trees = len(ts.tree_arrays)
-		for j in range(n_trees):
-			tree_array = ts.tree_arrays[j]
-			newick_string = ts.newick_strings[j]
-			topology_hash = tree_array["f0"].tostring()
+		if topology_hash not in topology_counts:
+			topology_tree = ete2.Tree(newick_string)
+			topology_string = topology_tree.write(format = 9) # strip branch lengths
 
-			if topology_hash not in topology_counts:
-				topology_tree = ete2.Tree(newick_string)
-				topology_string = topology_tree.write(format = 9) # strip branch lengths
+			topology_strings[topology_hash] = topology_string
+			topology_counts[topology_hash] = 1
+		else:
+			topology_counts[topology_hash] += 1
 
-				topology_strings[topology_hash] = topology_string
-				topology_counts[topology_hash] = [0] * n_partitions
+		for node in tree_array:
+			parent_id = node[0]
+			split_id = node[1]
 
-			topology_counts[topology_hash][i] += 1
+			n_node_taxa = clade_size(parent_id)
 
-			for node in tree_array:
-				parent_id = node[0]
-				split_id = node[1]
-
-				n_node_taxa = clade_size(parent_id)
-
-				if n_node_taxa > 2:
-					if parent_id not in cc_counts:
-						cc_id_pairs[parent_id] = {split_id: (parent_id, split_id)}
-						cc_counts[parent_id] = {split_id: [0] * n_partitions}
-					elif split_id not in cc_counts[parent_id]:
-						cc_id_pairs[parent_id][split_id] = (parent_id, split_id)
-						cc_counts[parent_id][split_id] = [0] * n_partitions
-
+			if n_node_taxa > 2:
+				if parent_id not in cc_counts:
+					cc_id_pairs[parent_id] = {split_id: (parent_id, split_id)}
+					cc_counts[parent_id] = {split_id: 1}
+				elif split_id not in cc_counts[parent_id]:
+					cc_id_pairs[parent_id][split_id] = (parent_id, split_id)
+					cc_counts[parent_id][split_id] = 1
+				else:
 					cc_counts[parent_id][split_id][i] += 1
 
 	topology_frequencies = DiscreteFrequencies(topology_counts)
@@ -353,85 +332,24 @@ def count_topologies(tree_samples):
 
 	return topology_frequencies, topology_strings, cc_frequencies, cc_id_pairs
 
-def count_vertices(this_node, all_nodes):
-	children = this_node.get_children()
-	left_child = children[0]
-	right_child = children[1]
-	n = 1
-	if not left_child.is_leaf():
-		n += count_vertices(left_child, all_nodes)
-	if not right_child.is_leaf():
-		n += count_vertices(right_child, all_nodes)
-	all_nodes.append(n)
-	return n
-
-def yule_log_prior(newick_string):
-	tree = ete2.Tree(newick_string)
-	f_vertices = []
-	n_vertices = count_vertices(tree, f_vertices)
-
-	log_prior = n_vertices * math.log(2) - math.lgamma(n_vertices + 2)
-	for f_vertex in f_vertices:
-		log_prior -= math.log(f_vertex)
-
-	return log_prior
-
-def log_labelled_histories(n_taxa):
-	llh  = 0.0
-	llh += math.lgamma(n_taxa + 1)
-	llh += math.lgamma(n_taxa)
-	llh -= (n_taxa - 1) * math.log(2)
-	return llh
-
-def log_subclade_rankings(n_taxa_1, n_taxa_2):
-	lsr  = 0.0
-	lsr += math.lgamma(n_taxa_1 + n_taxa_2 - 1)
-	lsr -= math.lgamma(n_taxa_1)
-	lsr -= math.lgamma(n_taxa_2)
-	return lsr
-
-def cc_yule_log_prior(cc_id_pair):
-	parent_id, split_id = cc_id_pair
-	child1_id, child2_id = elucidate_cc_split(parent_id, split_id)
-
-	n_child1_taxa = clade_size(child1_id)
-	n_child2_taxa = clade_size(child2_id)
-
-	n_parent_taxa = n_child1_taxa + n_child2_taxa
-
-	log_prior  = 0.0
-	log_prior += log_labelled_histories(n_child1_taxa)
-	log_prior += log_labelled_histories(n_child2_taxa)
-	log_prior += log_subclade_rankings(n_child1_taxa, n_child2_taxa)
-	log_prior -= log_labelled_histories(n_parent_taxa)
-
-	return log_prior
-
-def calculate_discrete_probabilities(discrete_frequencies, log_prior_function, log_prior_data, *log_prior_args):
+def calculate_discrete_probabilities(discrete_frequencies):
 	raw_log_probabilities = {}
 	normalized_probabilities = {}
 
 	df_array = discrete_frequencies.feature_frequencies
 	n_features = len(df_array)
 	for i in range(n_features):
-		feature_hash   = df_array[i][0]
-		feature_counts = list(df_array[i])[1:]
-		feature_data   = log_prior_data[feature_hash]
+		feature_hash  = df_array[i][0]
+		feature_count = df_array[i][1]
 
-		n_partitions = len(feature_counts)
+		log_probability = sum([math.log(p) for p in feature_counts])
+		raw_log_probabilities[feature_hash] = log_probability
 
-		if 0 in feature_counts:
-			normalized_probabilities[feature_hash] = 0.0
-		else:
-			log_probability = sum([math.log(p) for p in feature_counts]) - (n_partitions - 1) * log_prior_function(feature_data, *log_prior_args)
-			raw_log_probabilities[feature_hash] = log_probability
+	log_sum_of_probabilities = numpy.logaddexp.reduce(raw_log_probabilities.values())
 
-	if len(raw_log_probabilities) > 0:
-		log_sum_of_probabilities = numpy.logaddexp.reduce(raw_log_probabilities.values())
-
-		for feature_hash in raw_log_probabilities:
-			normalized_probability = math.exp(raw_log_probabilities[feature_hash] - log_sum_of_probabilities)
-			normalized_probabilities[feature_hash] = normalized_probability
+	for feature_hash in raw_log_probabilities:
+		normalized_probability = math.exp(raw_log_probabilities[feature_hash] - log_sum_of_probabilities)
+		normalized_probabilities[feature_hash] = normalized_probability
 
 	return normalized_probabilities
 
@@ -445,13 +363,10 @@ def read_newick(newick_path):
 		l = newick_file.readline()
 	return newick_strings
 
-def generate_tree_array(newick_string, taxon_order, calibration_taxon = "", calibration_time = 0.0):
-	if calibration_taxon == "":
-		calibration_taxon = taxon_order[0]
-
+def generate_tree_array(newick_string, taxon_order, calibration_taxon, calibration_date):
 	tree = ete2.Tree(newick_string)
 	calibration_node = tree.get_leaves_by_name(calibration_taxon)[0]
-	root_height = tree.get_distance(calibration_node) + calibration_time
+	root_height = tree.get_distance(calibration_node) + calibration_date
 
 	n_taxa = len(taxon_order)
 	id_bytes, id_remainder = divmod(n_taxa, 8)

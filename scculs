@@ -1,0 +1,17 @@
+#!/bin/sh
+
+# determine the relative location of scculs.py
+FRONTEND="`dirname "$0"`/scculs.py"
+
+# identify the first copy of python2.7 in the user's path
+PYTHONBIN=""
+for i in $( whereis python2 ) ; do
+	if [ "$PYTHONBIN" = "" ] ; then
+		case "$i" in
+			*bin/python2\.7 ) PYTHONBIN=$i;;
+		esac
+	fi
+done
+
+# execute scculs.py using python2.7
+$PYTHONBIN $FRONTEND "$@"
