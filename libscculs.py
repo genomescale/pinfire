@@ -1,22 +1,67 @@
 import numpy
 import ete2
+import dendropy
 import math
 
-order_differs_error = Exception("The set of taxa differs between tree samples, so they may not be directly compared")
+class TopologySample():
+	def __init__(self, newick_strings):
+		self.taxon_order = []
+		self.newick_strings = []
+		self.topology_arrays = []
 
-class UltrametricSample():
+		self.newick_strings = newick_strings
+		self.n_topologies = len(self.newick_strings)
+
+		for i in range(self.n_topologies):
+			ns = self.newick_strings[i]
+			tree = ete2.Tree(ns)
+			if i == 0:
+				taxa = tree.get_leaf_names()
+				self.taxon_order = sorted(taxa)
+
+			self.generate_topology_array(ns)
+
+	def generate_topology_array(self, newick_string):
+		topology_root = ete2.Tree(newick_string)
+
+		n_taxa = len(self.taxon_order)
+		id_bytes, id_remainder = divmod(n_taxa, 8)
+		if id_remainder == 0:
+			id_size = id_bytes
+		else:
+			id_size = id_bytes + 1
+
+		node_struct_format = "a%d,a%d" % (id_size, id_size)
+
+		topology_values = []
+		self.recurse_node_properties(topology_root, topology_values)
+
+		topology_array = numpy.array(topology_values, node_struct_format)
+		topology_array.sort() # clades should be sorted to that topology hashes are consistent
+		self.topology_arrays.append(topology_array)
+
+	def recurse_node_properties(self, node, topology_values):
+		if not node.is_leaf():
+			child1, child2 = node.get_children() # assumes strictly bifurcating tree
+			child1_clade = set(child1.get_leaf_names())
+			child2_clade = set(child2.get_leaf_names())
+
+			self.recurse_node_properties(child1, topology_values)
+			self.recurse_node_properties(child2, topology_values)
+
+			parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, self.taxon_order)
+			topology_values.append((parent_id, split_id))
+
+class UltrametricSample(TopologySample):
 	def __init__(self, newick_strings, calibration_taxon, calibration_date):
 		self.taxon_order = []
 		self.newick_strings = []
 		self.tree_arrays = []
-		self.feature_counts = {}
-
-		n_trees = len(newick_strings)
 
 		self.newick_strings = newick_strings
-		self.root_heights = numpy.zeros(n_trees, dtype = numpy.float64)
+		self.n_trees = len(self.newick_strings)
 
-		for i in range(n_trees):
+		for i in range(self.n_trees):
 			ns = self.newick_strings[i]
 			tree = ete2.Tree(ns)
 			if i == 0:
@@ -25,64 +70,253 @@ class UltrametricSample():
 				if calibration_taxon == "":
 					calibration_taxon = self.taxon_order[0]
 
-			tree_array = generate_tree_array(ns, self.taxon_order)
+			self.generate_tree_array(ns, calibration_taxon, calibration_date)
 
-			self.tree_arrays.append(tree_array)
+	def generate_tree_array(self, newick_string, calibration_taxon, calibration_date):
+		tree_root = ete2.Tree(newick_string)
+		calibration_node = tree_root.get_leaves_by_name(calibration_taxon)[0]
+		root_height = tree_root.get_distance(calibration_node) + calibration_date
 
-class DiscreteFrequencies():
-	feature_struct_format = ""
-	feature_frequencies = numpy.array(0)
+		n_taxa = len(self.taxon_order)
+		id_bytes, id_remainder = divmod(n_taxa, 8)
+		if id_remainder == 0:
+			id_size = id_bytes
+		else:
+			id_size = id_bytes + 1
 
-	def __init__(self, frequencies):
-		frequency_labels = frequencies.keys()
-		frequency_labels.sort()
-		n_features = len(frequency_labels)
+		node_struct_format = "a%d,a%d,f8" % (id_size, id_size)
 
-		first_feature = frequency_labels[0]
-		max_label_size = 0
+		tree_values = []
+		self.recurse_node_properties(tree_root, root_height, tree_values)
 
-		frequencies_table = []
-		for i in range(n_features):
-			feature = frequency_labels[i]
-			count = frequencies[feature]
-			feature_frequencies = tuple(feature, count)
-			frequencies_table.append(feature_frequencies)
+		tree_array = numpy.array(tree_values, node_struct_format)
+		tree_array.sort() # clades should be sorted to that topology hashes are consistent
+		self.tree_arrays.append(tree_array)
 
-			if len(feature) > max_label_size:
-				max_label_size = len(feature)
+	def recurse_node_properties(self, node, node_height, tree_values):
+		if not node.is_leaf():
+			child1, child2 = node.get_children() # assumes strictly bifurcating tree
+			child1_clade = set(child1.get_leaf_names())
+			child2_clade = set(child2.get_leaf_names())
 
-		self.feature_struct_format = "a" + str(max_label_size) + "u8"
-		self.feature_frequencies = numpy.array(frequencies_table, self.feature_struct_format)
+			child1_height = node_height - child1.dist
+			child2_height = node_height - child2.dist
 
-def defined_topology_probabilities(cc_probabilities, ts):
-	topology_probabilities = {}
-	topology_strings = {}
+			self.recurse_node_properties(child1, child1_height, tree_values)
+			self.recurse_node_properties(child2, child2_height, tree_values)
 
-	n_trees = len(ts.tree_arrays)
-	for j in range(n_trees):
-		tree_array = ts.tree_arrays[j]
-		newick_string = ts.newick_strings[j]
-		topology_hash = tree_array["f0"].tostring()
+			parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, self.taxon_order)
+			tree_values.append((parent_id, split_id, node_height))
 
-		if topology_hash not in topology_probabilities:
-			split_probabilities = []
+class DiscreteProbabilities():
+	def __init__(self, data):
+		sorted_hashes = sorted(data.keys())
+		self.n_features = len(sorted_hashes)
+		self.hashes_array = numpy.array(sorted_hashes)
 
-			topology_tree = ete2.Tree(newick_string)
-			topology_string = topology_tree.write(format = 9) # strip branch lengths
-			topology_strings[topology_hash] = topology_string
+		sorted_data = [data[feature_hash] for feature_hash in self.hashes_array]
+		self.data_array = numpy.array(sorted_data)
+		self.probabilities = {}
+		self.probabilities_array = numpy.zeros(self.n_features, dtype = numpy.float64)
 
-			for node in tree_array:
-				parent_id = node[0]
-				split_id = node[1]
+	def probabilities_from_counts(self, counts):
+		sorted_counts = [counts[feature_hash] for feature_hash in self.hashes_array]
+		counts_array = numpy.array(sorted_counts, dtype = numpy.uint64)
 
-				n_node_taxa = clade_size(parent_id)
-				if n_node_taxa > 2:
-					split_probability = cc_probabilities[parent_id][split_id]
-					split_probabilities.append(split_probability)
+		log_counts = {}
+		for i in range(self.n_features):
+			feature_hash  = self.hashes_array[i]
+			feature_count = counts_array[i]
 
-			topology_probabilities[topology_hash] = numpy.product(split_probabilities)
+			log_counts[feature_hash] = math.log(feature_count)
 
-	return topology_probabilities, topology_strings
+		log_sum_of_counts = numpy.logaddexp.reduce(log_counts.values())
+		for feature_hash in log_counts:
+			normalized_probability = math.exp(log_counts[feature_hash] - log_sum_of_counts)
+			self.probabilities[feature_hash] = normalized_probability
+
+		self.convert_probabilities()
+
+	def convert_probabilities(self):
+		sorted_probabilities = [self.probabilities[feature_hash] for feature_hash in self.hashes_array]
+		self.probabilities_array = numpy.array(sorted_probabilities, dtype = numpy.float64)
+
+	def cull_probabilities(self, max_features, max_probability):
+		topology_ascending_order = numpy.argsort(self.probabilities_array)
+		topology_descending_order = topology_ascending_order[::-1]
+
+		posterior_features = 0
+		posterior_probability = 0.0
+
+		cull_indices = []
+		for i in topology_descending_order:
+			if (posterior_features >= max_features) or (posterior_probability >= max_probability):
+				cull_hash = self.hashes_array[i]
+				self.probabilities.pop(cull_hash)
+				cull_indices.append(i)
+
+			posterior_features += 1
+			posterior_probability += self.probabilities_array[i]
+
+		self.probabilities_array = numpy.delete(self.probabilities_array, cull_indices)
+		self.hashes_array = numpy.delete(self.hashes_array, cull_indices)
+		self.data_array = numpy.delete(self.data_array, cull_indices)
+
+		self.n_features = len(self.probabilities_array)
+
+class TopologyProbabilities(DiscreteProbabilities):
+	def probabilities_from_ccs(self, cc_probabilities):
+		topology_sample = TopologySample(self.data_array)
+
+		for i in range(self.n_features):
+			topology_array = topology_sample.topology_arrays[i]
+			topology_hash = self.hashes_array[i]
+			node_probabilities = []
+			for node in topology_array:
+				parent_hash = node[0].tostring() # the hash for the clade
+				split_hash = node[1].tostring() # the hash for the bifurcation
+
+				n_node_taxa = clade_size(parent_hash)
+				if n_node_taxa >= 3: # conditional clade
+					split_probability = cc_probabilities[parent_hash].probabilities[split_hash]
+					node_probabilities.append(split_probability)
+
+			topology_probability = numpy.prod(node_probabilities)
+			self.probabilities[topology_hash] = topology_probability
+
+		self.convert_probabilities()
+
+def calculate_topology_probabilities(ts):
+	topology_counts = {}
+	topology_data = {}
+	cc_counts = {}
+	cc_data = {}
+
+	for i in range(ts.n_trees):
+		tree_array = ts.tree_arrays[i]
+		topology_hash = tree_array["f0"].tostring() # topology hash is concatenated, sorted clade hashes
+
+		if topology_hash not in topology_counts: # record topology
+			tree_newick = ts.newick_strings[i]
+			tree_root = ete2.Tree(tree_newick)
+			topology_newick = tree_root.write(format = 9) # strip branch lengths
+			topology_data[topology_hash] = topology_newick
+			topology_counts[topology_hash] = 1
+		else:
+			topology_counts[topology_hash] += 1
+
+		topology_array = tree_array[["f0", "f1"]] # we are only interested in clade & split hashes, not node heights
+		for node in topology_array:
+			parent_hash = node[0].tostring() # the hash for the clade
+			split_hash = node[1].tostring() # the hash for the bifurcation
+
+			n_node_taxa = clade_size(parent_hash)
+			if n_node_taxa >= 3: # record conditional clade
+				if parent_hash not in cc_counts:
+					cc_data[parent_hash] = {split_hash: node}
+					cc_counts[parent_hash] = {split_hash: 1}
+				elif split_hash not in cc_counts[parent_hash]:
+					cc_data[parent_hash][split_hash] = node
+					cc_counts[parent_hash][split_hash] = 1
+				else:
+					cc_counts[parent_hash][split_hash] += 1
+
+	topology_set = TopologyProbabilities(topology_data)
+
+	cc_sets = {}
+	for parent_hash, splits_data in cc_data.items():
+		cc_sets[parent_hash] = DiscreteProbabilities(splits_data)
+
+	return topology_set, topology_counts, cc_sets, cc_counts
+
+def derive_best_topologies(cc_probabilities, taxon_order, trees_threshold = 1, post_threshold = 1.0):
+	cherry_hash = "\x80"
+
+	n_taxa = len(taxon_order)
+	root_hash = calculate_root_hash(n_taxa)
+	n_bytes = len(root_hash) # maximum number of bytes required to store parent clade hashes or split hashes
+
+	derived_struct_format = "a%d,a%d,u1,f8" % (n_bytes, n_bytes)
+
+	star_tree = numpy.array([(root_hash, "", 1, 1.0)], dtype=derived_struct_format)
+	candidate_topologies = [star_tree]
+	candidate_inv_probs = [0.0]
+
+	best_topologies = []
+	best_probabilities = []
+	best_posterior = 0.0
+	while (len(candidate_topologies) > 0) and (len(best_topologies) < trees_threshold) and (best_posterior < post_threshold):
+		candidate_topology = candidate_topologies.pop(0)
+		candidate_inv_prob = candidate_inv_probs.pop(0)
+		candidate_nodes = numpy.flatnonzero(candidate_topology["f2"])
+
+		if len(candidate_nodes) == 0: # candidate topology is fully resolved
+			candidate_probability = 1.0 - candidate_inv_prob
+			best_topologies.append(candidate_topology)
+			best_probabilities.append(candidate_probability)
+			best_posterior += candidate_probability
+		else: # candidate topology is not fully resolved
+			unresolved_node_index = candidate_nodes[0]
+			unresolved_node_hash = candidate_topology[unresolved_node_index]["f0"].tostring()
+			split_probabilities = cc_probabilities[unresolved_node_hash]
+
+			new_candidate_topologies = []
+			new_candidate_inv_probs = []
+			for split_hash in split_probabilities:
+				split_probability = split_probabilities[split_hash]
+				if split_probability > 0.0:
+					child1_hash, child2_hash = elucidate_cc_split(unresolved_node_hash, split_hash)
+					child1_size = clade_size(child1_hash)
+					child2_size = clade_size(child2_hash)
+
+					new_topology_rows = []
+					if child1_size > 1:
+						if child1_size == 2: # resolved (cherry)
+							child1_row = numpy.array([(child1_hash, cherry_hash, 0, 1.0)], dtype=derived_struct_format)
+						else: # unresolved (more than two taxa)
+							child1_row = numpy.array([(child1_hash, "", 1, 1.0)], dtype=derived_struct_format)
+						new_topology_rows.append(child1_row)
+
+					if child2_size > 1:
+						if child2_size == 2: # resolved (cherry)
+							child2_row = numpy.array([(child2_hash, cherry_hash, 0, 1.0)], dtype=derived_struct_format)
+						else: # unresolved (more than two taxa)
+							child2_row = numpy.array([(child2_hash, "", 1, 1.0)], dtype=derived_struct_format)
+						new_topology_rows.append(child2_row)
+
+					new_topology = numpy.concatenate([candidate_topology] + new_topology_rows)
+					new_topology[unresolved_node_index]["f1"] = split_hash
+					new_topology[unresolved_node_index]["f2"] = 0
+					new_topology[unresolved_node_index]["f3"] = split_probability
+					new_candidate_topologies.append(new_topology)
+
+					new_topology_inv_probability = 1.0 - numpy.prod(new_topology["f3"])
+					new_candidate_inv_probs.append(new_topology_inv_probability)
+
+			integrate_probability(candidate_inv_probs, candidate_topologies, new_candidate_inv_probs, new_candidate_topologies)
+		print(len(candidate_topologies), len(best_topologies), sum([1.0 - p for p in candidate_inv_probs]), best_posterior) # number of candidate and best topologies, total posterior of candidate and best topologies
+
+	derived_topology_probabilities = {}
+	derived_topology_newick = {}
+	for i in range(len(best_topologies)):
+		topology = best_topologies[i]
+		probability = best_probabilities[i]
+		topology_hash = numpy.sort(topology["f0"]).tostring()
+
+		splits = {}
+		for node in topology:
+			parent_id = node["f0"]
+			split_id = node["f1"]
+			splits[parent_id] = split_id
+
+		tree_model = ete2.Tree()
+		derive_tree_from_splits(tree_model, root_hash, taxon_order, splits)
+		newick = tree_model.write(format = 9)
+
+		derived_topology_probabilities[topology_hash] = probability
+		derived_topology_newick[topology_hash] = newick
+
+	return derived_topology_probabilities, derived_topology_newick
 
 def elucidate_cc_split(parent_id, split_id):
 	parent_id_bytes = numpy.array(tuple(parent_id)).view(dtype = numpy.uint8)
@@ -128,121 +362,6 @@ def integrate_probability(original_probs, original_data, new_probs, new_data):
 		original_probs.insert(rank, probability)
 		original_data.insert(rank, observation)
 
-def best_topology_probabilities(cc_probabilities, taxon_order, trees_threshold = 1, post_threshold = 1.0):
-	n_taxa = len(taxon_order)
-	n_bytes, remainder = divmod(n_taxa, 8)
-	if remainder > 0:
-		n_bytes += 1
-
-	derived_struct_format = "a%d,a%d,u1,f8" % (n_bytes, n_bytes)
-
-	cherry_hash = "\x80"
-	root_hash = calculate_root_hash(n_taxa)
-	star_tree = numpy.array([(root_hash, "", 1, 1.0)], dtype=derived_struct_format)
-	unresolved_topologies = [star_tree]
-	unresolved_inv_probs = [0.0]
-
-	resolved_topologies = []
-	resolved_inv_probs = []
-
-	best_topologies = []
-	best_probabilities = []
-	best_posterior = 0.0
-	while ((len(unresolved_topologies) > 0) or (len(resolved_topologies) > 0)) and (len(best_topologies) < trees_threshold) and (best_posterior < post_threshold):
-		print(len(unresolved_topologies), len(resolved_topologies), len(best_topologies), sum([1.0 - p for p in unresolved_inv_probs]), sum([1.0 - p for p in resolved_inv_probs]), best_posterior)
-
-		if len(unresolved_topologies) == 0:
-			max_unresolved_prob = 0.0
-		else:
-			max_unresolved_prob = 1.0 - unresolved_inv_probs[0]
-
-		if len(resolved_topologies) == 0:
-			max_resolved_prob = 0.0
-		else:
-			max_resolved_prob = 1.0 - resolved_inv_probs[0]
-
-		if max_resolved_prob >= max_unresolved_prob:
-			resolved_topology = resolved_topologies.pop(0)
-			resolved_inv_probs = resolved_inv_probs[1:]
-			best_topologies.append(resolved_topology)
-			best_probabilities.append(max_resolved_prob)
-			best_posterior += max_resolved_prob
-		else:
-			unresolved_topology = unresolved_topologies.pop(0)
-			unresolved_inv_probs = unresolved_inv_probs[1:]
-
-			unresolved_nodes = numpy.flatnonzero(unresolved_topology["f2"])
-			unresolved_index = unresolved_nodes[0]
-			unresolved_hash = unresolved_topology[unresolved_index]["f0"].tostring()
-			split_probabilities = cc_probabilities[unresolved_hash]
-
-			new_unresolved_topologies = []
-			new_unresolved_inv_probs = []
-			new_resolved_topologies = []
-			new_resolved_inv_probs = []
-			for split_hash in split_probabilities:
-				split_probability = split_probabilities[split_hash]
-				if split_probability > 0.0:
-					child1_hash, child2_hash = elucidate_cc_split(unresolved_hash, split_hash)
-					child1_size = clade_size(child1_hash)
-					child2_size = clade_size(child2_hash)
-
-					new_topology_rows = []
-					if child1_size > 1:
-						if child1_size == 2: # resolved (cherry)
-							child1_row = numpy.array([(child1_hash, cherry_hash, 0, 1.0)], dtype=derived_struct_format)
-						else: # unresolved (more than two taxa)
-							child1_row = numpy.array([(child1_hash, "", 1, 1.0)], dtype=derived_struct_format)
-						new_topology_rows.append(child1_row)
-
-					if child2_size > 1:
-						if child2_size == 2: # resolved (cherry)
-							child2_row = numpy.array([(child2_hash, cherry_hash, 0, 1.0)], dtype=derived_struct_format)
-						else: # unresolved (more than two taxa)
-							child2_row = numpy.array([(child2_hash, "", 1, 1.0)], dtype=derived_struct_format)
-						new_topology_rows.append(child2_row)
-
-					new_topology = numpy.concatenate([unresolved_topology] + new_topology_rows)
-					new_topology[unresolved_index]["f1"] = split_hash
-					new_topology[unresolved_index]["f2"] = 0
-					new_topology[unresolved_index]["f3"] = split_probability
-
-					n_unresolved_nodes = numpy.sum(new_topology["f2"])
-					new_topology_inv_probability = 1.0 - numpy.prod(new_topology["f3"])
-					if n_unresolved_nodes == 0:
-						new_resolved_topologies.append(new_topology)
-						new_resolved_inv_probs.append(new_topology_inv_probability)
-					else:
-						new_unresolved_topologies.append(new_topology)
-						new_unresolved_inv_probs.append(new_topology_inv_probability)
-
-			integrate_probability(resolved_inv_probs, resolved_topologies, new_resolved_inv_probs, new_resolved_topologies)
-			integrate_probability(unresolved_inv_probs, unresolved_topologies, new_unresolved_inv_probs, new_unresolved_topologies)
-
-	print(len(unresolved_topologies), len(resolved_topologies), len(best_topologies), sum([1.0 - p for p in unresolved_inv_probs]), sum([1.0 - p for p in resolved_inv_probs]), best_posterior)
-
-	derived_topology_probabilities = {}
-	derived_topology_newick = {}
-	for i in range(len(best_topologies)):
-		topology = best_topologies[i]
-		probability = best_probabilities[i]
-		topology_hash = numpy.sort(topology["f0"]).tostring()
-
-		splits = {}
-		for node in topology:
-			parent_id = node["f0"]
-			split_id = node["f1"]
-			splits[parent_id] = split_id
-
-		tree_model = ete2.Tree()
-		derive_tree_from_splits(tree_model, root_hash, taxon_order, splits)
-		newick = tree_model.write(format = 9)
-
-		derived_topology_probabilities[topology_hash] = probability
-		derived_topology_newick[topology_hash] = newick
-
-	return derived_topology_probabilities, derived_topology_newick
-
 def derive_tree_from_splits(current_node, parent_hash, taxon_order, splits):
 	split_hash = splits[parent_hash]
 	child1_hash, child2_hash = elucidate_cc_split(parent_hash, split_hash)
@@ -286,119 +405,24 @@ def clade_taxon_names(clade_hash, taxon_order):
 
 	return taxon_names
 
-def count_topologies(ts):
-	topology_counts = {}
-	topology_strings = {}
-	cc_counts = {}
-	cc_id_pairs = {}
+# read a nexus or newick format file containing phylogenetic trees
+# if the file does not begin with a nexus header, assumes it is a newick file
+# returns a list of newick strings, in the same order as the input file
+def trees_from_path(trees_filepath):
+	nexus_header = "#NEXUS"
 
-	n_trees = len(ts.tree_arrays)
-	for j in range(n_trees):
-		tree_array = ts.tree_arrays[j]
-		newick_string = ts.newick_strings[j]
-		topology_hash = tree_array["f0"].tostring()
+	trees_file = open(trees_filepath)
+	first_line = trees_file.readline().strip().upper()
+	trees_file.seek(0)
 
-		if topology_hash not in topology_counts:
-			topology_tree = ete2.Tree(newick_string)
-			topology_string = topology_tree.write(format = 9) # strip branch lengths
+	if first_line == nexus_header: # looks like a nexus file, convert to newick
+		trees_list = dendropy.TreeList.get_from_stream(trees_file, schema = "nexus")
+		newick_blob = trees_list.as_string("newick", suppress_rooting = True)
+	else: # assume file is already in newick format
+		newick_blob = trees_file.read()
 
-			topology_strings[topology_hash] = topology_string
-			topology_counts[topology_hash] = 1
-		else:
-			topology_counts[topology_hash] += 1
-
-		for node in tree_array:
-			parent_id = node[0]
-			split_id = node[1]
-
-			n_node_taxa = clade_size(parent_id)
-
-			if n_node_taxa > 2:
-				if parent_id not in cc_counts:
-					cc_id_pairs[parent_id] = {split_id: (parent_id, split_id)}
-					cc_counts[parent_id] = {split_id: 1}
-				elif split_id not in cc_counts[parent_id]:
-					cc_id_pairs[parent_id][split_id] = (parent_id, split_id)
-					cc_counts[parent_id][split_id] = 1
-				else:
-					cc_counts[parent_id][split_id][i] += 1
-
-	topology_frequencies = DiscreteFrequencies(topology_counts)
-	cc_frequencies = {}
-
-	for parent_id in cc_counts:
-		conditional_count = cc_counts[parent_id]
-		cc_frequencies[parent_id] = DiscreteFrequencies(conditional_count)
-
-	return topology_frequencies, topology_strings, cc_frequencies, cc_id_pairs
-
-def calculate_discrete_probabilities(discrete_frequencies):
-	raw_log_probabilities = {}
-	normalized_probabilities = {}
-
-	df_array = discrete_frequencies.feature_frequencies
-	n_features = len(df_array)
-	for i in range(n_features):
-		feature_hash  = df_array[i][0]
-		feature_count = df_array[i][1]
-
-		log_probability = sum([math.log(p) for p in feature_counts])
-		raw_log_probabilities[feature_hash] = log_probability
-
-	log_sum_of_probabilities = numpy.logaddexp.reduce(raw_log_probabilities.values())
-
-	for feature_hash in raw_log_probabilities:
-		normalized_probability = math.exp(raw_log_probabilities[feature_hash] - log_sum_of_probabilities)
-		normalized_probabilities[feature_hash] = normalized_probability
-
-	return normalized_probabilities
-
-def read_newick(newick_path):
-	newick_file = open(newick_path)
-	newick_strings = []
-	l = newick_file.readline()
-	while l != "":
-		tree_string = l.strip()
-		newick_strings.append(tree_string)
-		l = newick_file.readline()
+	newick_strings = newick_blob.strip().split("\n")
 	return newick_strings
-
-def generate_tree_array(newick_string, taxon_order, calibration_taxon, calibration_date):
-	tree = ete2.Tree(newick_string)
-	calibration_node = tree.get_leaves_by_name(calibration_taxon)[0]
-	root_height = tree.get_distance(calibration_node) + calibration_date
-
-	n_taxa = len(taxon_order)
-	id_bytes, id_remainder = divmod(n_taxa, 8)
-	if id_remainder == 0:
-		id_size = id_bytes
-	else:
-		id_size = id_bytes + 1
-
-	node_struct_format = "a%d,a%d,f8" % (id_size, id_size)
-
-	tree_values = []
-	recurse_node_properties(tree, taxon_order, root_height, tree_values)
-
-	tree_array = numpy.array(tree_values, node_struct_format)
-	tree_array.sort()
-
-	return tree_array
-
-def recurse_node_properties(node, taxon_order, node_height, tree_values):
-	if not node.is_leaf():
-		child1, child2 = node.get_children() # assumes strictly bifurcating tree
-		child1_clade = set(child1.get_leaf_names())
-		child2_clade = set(child2.get_leaf_names())
-
-		child1_height = node_height - child1.dist
-		child2_height = node_height - child2.dist
-
-		recurse_node_properties(child1, taxon_order, child1_height, tree_values)
-		recurse_node_properties(child2, taxon_order, child2_height, tree_values)
-
-		parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, taxon_order)
-		tree_values.append((parent_id, split_id, node_height))
 
 def calculate_node_ids(children_a, children_b, taxon_order):
 	n_taxa = len(taxon_order)
