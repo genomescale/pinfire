@@ -3,6 +3,7 @@ PROGRAM_VERSION = "scculs.py, part of SCCULS preview-1"
 import libscculs
 import argparse
 import os
+import csv
 
 arg_parser = argparse.ArgumentParser(description = "SCCULS: Scalable Conditional-Clade Ultrametric Summary trees. Produces an annotate summary tree from an MCMC sample, using the highest tree probability calculated from conditional clade frequencies, or from topology frequencies.")
 arg_parser.add_argument("-v", "--version", action = "version", version = PROGRAM_VERSION)
@@ -81,7 +82,25 @@ if args.candidate_method == "sampled":
 #	output_topology_set = libscculs.derive_best_topologies(cc_sets, max_tree_topologies, max_probability)
 
 if args.newick_output is not None:
+	newick_path_prefix = args.newick_output
 	for i in range(output_topology_set.n_features):
-		ns = output_topology_set.data_array[i]
-		prob = output_topology_set.probabilities_array[i]
-		print("%g %s" % (prob, ns))
+		newick_string = output_topology_set.data_array[i]
+		newick_output_path = newick_path_prefix + "." + str(i)
+		newick_output_file = open(newick_output_path, "w")
+		newick_output_file.write(newick_string + "\n")
+		newick_output_file.close()
+
+if args.csv_output is not None:
+	csv_output_path = args.csv_output
+	csv_output_file = open(csv_output_path, "w")
+	csv_writer = csv.writer(csv_output_file)
+
+	header_row = ["topology", "probability"]
+	csv_writer.writerow(header_row)
+
+	for i in range(output_topology_set.n_features):
+		topology_probability = output_topology_set.probabilities_array[i]
+		output_row = [i, topology_probability]
+		csv_writer.writerow(output_row)
+
+	csv_output_file.close()

@@ -417,9 +417,12 @@ def trees_from_path(trees_filepath):
 
 	if first_line == nexus_header: # looks like a nexus file, convert to newick
 		trees_list = dendropy.TreeList.get_from_stream(trees_file, schema = "nexus")
+		trees_file.close()
+
 		newick_blob = trees_list.as_string("newick", suppress_rooting = True)
 	else: # assume file is already in newick format
 		newick_blob = trees_file.read()
+		trees_file.close()
 
 	newick_strings = newick_blob.strip().split("\n")
 	return newick_strings
