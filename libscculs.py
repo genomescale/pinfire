@@ -186,6 +186,67 @@ class TopologyProbabilities(DiscreteProbabilities):
 
 		self.convert_probabilities()
 
+# read a nexus or newick format file containing phylogenetic trees
+# if the file does not begin with a nexus header, assumes it is a newick file
+# returns a list of newick strings, in the same order as the input file
+def trees_from_path(trees_filepath):
+	nexus_header = "#NEXUS"
+
+	trees_file = open(trees_filepath)
+	first_line = trees_file.readline().strip().upper()
+	trees_file.seek(0)
+
+	if first_line == nexus_header: # looks like a nexus file, convert to newick
+		trees_list = dendropy.TreeList.get_from_stream(trees_file, schema = "nexus")
+		trees_file.close()
+
+		newick_blob = trees_list.as_string("newick", suppress_rooting = True)
+	else: # assume file is already in newick format
+		newick_blob = trees_file.read()
+		trees_file.close()
+
+	newick_strings = newick_blob.strip().split("\n")
+	return newick_strings
+
+def calculate_node_ids(children_a, children_b, taxon_order):
+	n_taxa = len(taxon_order)
+	children = set.union(children_a, children_b)
+
+	parent_boolean = numpy.zeros(n_taxa, dtype=numpy.uint8)
+	split_boolean = numpy.zeros(n_taxa, dtype=numpy.uint8)
+
+	i = 0
+	for j in range(n_taxa):
+		t = taxon_order[j]
+		if t in children:
+			parent_boolean[j] = 1
+
+			if i == 0:
+				if t in children_a:
+					a_first = True
+				else:
+					a_first = False
+
+			if (t in children_b) ^ a_first: # first child always "True"
+				split_boolean[i] = 1
+
+			i += 1
+
+	parent_packed = numpy.packbits(parent_boolean)
+	split_packed = numpy.packbits(split_boolean)
+
+	parent_id = parent_packed.tostring()
+	split_id = split_packed.tostring()
+
+	return parent_id, split_id
+
+def clade_size(clade_hash):
+	clade_node_bytes = numpy.array(tuple(clade_hash)).view(dtype = numpy.uint8)
+	clade_node_bits = numpy.unpackbits(clade_node_bytes)
+	n_clade_taxa = sum(clade_node_bits)
+
+	return n_clade_taxa
+
 def calculate_topology_probabilities(ts):
 	topology_counts = {}
 	topology_data = {}
@@ -229,7 +290,7 @@ def calculate_topology_probabilities(ts):
 
 	return topology_set, topology_counts, cc_sets, cc_counts
 
-def derive_best_topologies(cc_probabilities, taxon_order, trees_threshold = 1, post_threshold = 1.0):
+def derive_best_topologies(cc_sets, taxon_order, topologies_threshold, probability_threshold):
 	cherry_hash = "\x80"
 
 	n_taxa = len(taxon_order)
@@ -245,7 +306,7 @@ def derive_best_topologies(cc_probabilities, taxon_order, trees_threshold = 1, p
 	best_topologies = []
 	best_probabilities = []
 	best_posterior = 0.0
-	while (len(candidate_topologies) > 0) and (len(best_topologies) < trees_threshold) and (best_posterior < post_threshold):
+	while (len(candidate_topologies) > 0) and (len(best_topologies) < topologies_threshold) and (best_posterior < probability_threshold):
 		candidate_topology = candidate_topologies.pop(0)
 		candidate_inv_prob = candidate_inv_probs.pop(0)
 		candidate_nodes = numpy.flatnonzero(candidate_topology["f2"])
@@ -258,7 +319,7 @@ def derive_best_topologies(cc_probabilities, taxon_order, trees_threshold = 1, p
 		else: # candidate topology is not fully resolved
 			unresolved_node_index = candidate_nodes[0]
 			unresolved_node_hash = candidate_topology[unresolved_node_index]["f0"].tostring()
-			split_probabilities = cc_probabilities[unresolved_node_hash]
+			split_probabilities = cc_sets[unresolved_node_hash].probabilities
 
 			new_candidate_topologies = []
 			new_candidate_inv_probs = []
@@ -294,6 +355,7 @@ def derive_best_topologies(cc_probabilities, taxon_order, trees_threshold = 1, p
 					new_candidate_inv_probs.append(new_topology_inv_probability)
 
 			integrate_probability(candidate_inv_probs, candidate_topologies, new_candidate_inv_probs, new_candidate_topologies)
+
 		print(len(candidate_topologies), len(best_topologies), sum([1.0 - p for p in candidate_inv_probs]), best_posterior) # number of candidate and best topologies, total posterior of candidate and best topologies
 
 	derived_topology_probabilities = {}
@@ -317,6 +379,13 @@ def derive_best_topologies(cc_probabilities, taxon_order, trees_threshold = 1, p
 		derived_topology_newick[topology_hash] = newick
 
 	return derived_topology_probabilities, derived_topology_newick
+
+def calculate_root_hash(n_taxa):
+	root_hash_bits = numpy.ones(n_taxa, dtype = numpy.uint8)
+	root_hash_bytes = numpy.packbits(root_hash_bits)
+	root_hash = root_hash_bytes.tostring()
+
+	return root_hash
 
 def elucidate_cc_split(parent_id, split_id):
 	parent_id_bytes = numpy.array(tuple(parent_id)).view(dtype = numpy.uint8)
@@ -385,13 +454,6 @@ def derive_tree_from_splits(current_node, parent_hash, taxon_order, splits):
 	else:
 		derive_tree_from_splits(child2_node, child2_hash, taxon_order, splits)
 
-def clade_size(clade_hash):
-	clade_node_bytes = numpy.array(tuple(clade_hash)).view(dtype = numpy.uint8)
-	clade_node_bits = numpy.unpackbits(clade_node_bytes)
-	n_clade_taxa = sum(clade_node_bits)
-
-	return n_clade_taxa
-
 def clade_taxon_names(clade_hash, taxon_order):
 	taxon_names = []
 
@@ -404,81 +466,6 @@ def clade_taxon_names(clade_hash, taxon_order):
 			taxon_names.append(taxon_order[i])
 
 	return taxon_names
-
-# read a nexus or newick format file containing phylogenetic trees
-# if the file does not begin with a nexus header, assumes it is a newick file
-# returns a list of newick strings, in the same order as the input file
-def trees_from_path(trees_filepath):
-	nexus_header = "#NEXUS"
-
-	trees_file = open(trees_filepath)
-	first_line = trees_file.readline().strip().upper()
-	trees_file.seek(0)
-
-	if first_line == nexus_header: # looks like a nexus file, convert to newick
-		trees_list = dendropy.TreeList.get_from_stream(trees_file, schema = "nexus")
-		trees_file.close()
-
-		newick_blob = trees_list.as_string("newick", suppress_rooting = True)
-	else: # assume file is already in newick format
-		newick_blob = trees_file.read()
-		trees_file.close()
-
-	newick_strings = newick_blob.strip().split("\n")
-	return newick_strings
-
-def calculate_node_ids(children_a, children_b, taxon_order):
-	n_taxa = len(taxon_order)
-	children = set.union(children_a, children_b)
-
-	parent_boolean = numpy.zeros(n_taxa, dtype=numpy.uint8)
-	split_boolean = numpy.zeros(n_taxa, dtype=numpy.uint8)
-
-	i = 0
-	for j in range(n_taxa):
-		t = taxon_order[j]
-		if t in children:
-			parent_boolean[j] = 1
-
-			if i == 0:
-				if t in children_a:
-					a_first = True
-				else:
-					a_first = False
-
-			if (t in children_b) ^ a_first: # first child always "True"
-				split_boolean[i] = 1
-
-			i += 1
-
-	parent_packed = numpy.packbits(parent_boolean)
-	split_packed = numpy.packbits(split_boolean)
-
-	parent_id = parent_packed.tostring()
-	split_id = split_packed.tostring()
-
-	return parent_id, split_id
-
-def rank_discrete(discrete_probabilities):
-	flat_discrete_hashes = []
-	flat_discrete_probs = []
-	for discrete_hash, discrete_probability in discrete_probabilities.items():
-		if discrete_probability > 0.0:
-			flat_discrete_hashes.append(discrete_hash)
-			flat_discrete_probs.append(discrete_probability)
-
-	ascending_prob_order = numpy.argsort(flat_discrete_probs)
-	declining_prob_order = ascending_prob_order[::-1]
-
-	discrete_rank = 0
-
-	discrete_ranking = {}
-	for i in declining_prob_order:
-		discrete_rank += 1
-		discrete_hash = flat_discrete_hashes[i]
-		discrete_ranking[discrete_hash] = discrete_rank
-
-	return discrete_ranking
 
 def reverse_cc_probabilities(cc_probabilities):
 	reverse_ccp = {}
@@ -553,13 +540,6 @@ def add_derived_probabilities(newick_strings, taxon_order, ccp):
 		annotated_topologies[topology_hash] = annotated_newick
 
 	return annotated_topologies
-
-def calculate_root_hash(n_taxa):
-	root_hash_bits = numpy.ones(n_taxa, dtype = numpy.uint8)
-	root_hash_bytes = numpy.packbits(root_hash_bits)
-	root_hash = root_hash_bytes.tostring()
-
-	return root_hash
 
 def nonzero_derived_topologies(ccp, taxon_order):
 	n_taxa = len(taxon_order)

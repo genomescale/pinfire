@@ -15,8 +15,9 @@ defaults_group.add_argument("-p", "--probability-method", type = str, choices = 
 defaults_group.add_argument("-u", "--support-values", type = str, default = "clade", choices = ["clade", "conditional-clade", "both"], help = "The type of support values added to summary tree nodes: clade monophyly probabilities, or conditional clade probabilities, or both. Default: both.")
 
 output_group = arg_parser.add_argument_group('output files')
-output_group.add_argument("-n", "--newick-output", metavar = "NEWICK_OUTPUT_PATH", type = str, help = "Output the summary tree(s) in newick format. When --max-topologies is greater than 1, more than one tree may be returned, so an identifying number will be appended to the end of each filename. This output and/or a CSV output must be supplied.")
-output_group.add_argument("-o", "--csv-output", metavar = "CSV_OUTPUT_PATH", type = str, help = "Calculate statistics for each returned tree topology, and output them to a file in CSV format. This output and/or a newick output must be supplied.")
+output_group.add_argument("-n", "--newick-output", metavar = "NEWICK_OUTPUT_PATH", type = str, help = "Output the summary tree(s) in newick format. When --max-topologies is greater than 1, more than one tree may be returned, so an identifying number will be appended to the end of each filename.")
+output_group.add_argument("-o", "--csv-output", metavar = "CSV_OUTPUT_PATH", type = str, help = "Calculate statistics for each returned tree topology, and output them to a file in CSV format.")
+output_group.add_argument("-a", "--text-output", metavar = "TEXT_OUTPUT_PATH", type = str, help = "Calculate the number of topologies or conditional clades with non-zero probability, and the number of possible topologies or conditional clades for the number of taxa.")
 
 limits_group = arg_parser.add_argument_group('output limits')
 limits_group.add_argument("-m", "--max-probability", type = float, default = 1.0, help = "The size of the credible set in total posterior probability to output. The number of topologies returned will still be limited by -t/--max-topologies. Default: 1.0")
@@ -31,9 +32,7 @@ input_group.add_argument("sample_path", metavar = "MCMC_SAMPLE_PATH", type = str
 args = arg_parser.parse_args()
 
 # raise errors in response to incomplete or nonsensical user-supplied arguments
-if not (args.newick_output or args.csv_output):
-	arg_parser.error("specify output file paths using -n/--newick-output and -o/--csv-output")
-elif args.probability_method is None and args.candidate_method == "sampled":
+if args.probability_method is None and args.candidate_method == "sampled":
 	arg_parser.error("argument -p/--probability-method is required when -c/--candidate-method is 'sampled'")
 elif args.probability_method is not None and args.candidate_method == "derived":
 	arg_parser.error("argument -p/--probability-method must not be used when -c/--candidate-method is 'derived'")
@@ -76,10 +75,9 @@ if args.candidate_method == "sampled":
 
 	topology_set.cull_probabilities(max_tree_topologies, max_probability)
 	output_topology_set = topology_set
-
-#else:
-#	print("Deriving probable topologies from conditional clades...")
-#	output_topology_set = libscculs.derive_best_topologies(cc_sets, max_tree_topologies, max_probability)
+else:
+	print("Deriving probable topologies from conditional clades...")
+	output_topology_set = libscculs.derive_best_topologies(cc_sets, taxon_order, max_tree_topologies, max_probability)
 
 if args.newick_output is not None:
 	newick_path_prefix = args.newick_output
@@ -104,3 +102,9 @@ if args.csv_output is not None:
 		csv_writer.writerow(output_row)
 
 	csv_output_file.close()
+
+if args.text_output is not None:
+	if args.candidate_method == "sampled": # calculate summary statistics for topologies
+		pass
+	else: # calculate summary statistics for conditional clades
+		pass
