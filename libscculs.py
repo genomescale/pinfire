@@ -120,7 +120,13 @@ class DiscreteProbabilities():
 		self.probabilities_array = numpy.zeros(self.n_features, dtype = numpy.float64)
 
 	def probabilities_from_counts(self, counts):
-		sorted_counts = [counts[feature_hash] for feature_hash in self.hashes_array]
+		sorted_counts = []
+		for feature_hash in self.hashes_array:
+			if feature_hash in counts:
+				sorted_counts.append(counts[feature_hash])
+			else:
+				sorted_counts.append(0)
+
 		counts_array = numpy.array(sorted_counts, dtype = numpy.uint64)
 
 		log_counts = {}
@@ -128,12 +134,16 @@ class DiscreteProbabilities():
 			feature_hash  = self.hashes_array[i]
 			feature_count = counts_array[i]
 
-			log_counts[feature_hash] = math.log(feature_count)
+			if feature_counts == 0:
+				self.probabilities[feature_hash] = 0.0
+			else:
+				log_counts[feature_hash] = math.log(feature_count)
 
-		log_sum_of_counts = numpy.logaddexp.reduce(log_counts.values())
-		for feature_hash in log_counts:
-			normalized_probability = math.exp(log_counts[feature_hash] - log_sum_of_counts)
-			self.probabilities[feature_hash] = normalized_probability
+		if len(log_counts) > 0:
+			log_sum_of_counts = numpy.logaddexp.reduce(log_counts.values())
+			for feature_hash in log_counts:
+				normalized_probability = math.exp(log_counts[feature_hash] - log_sum_of_counts)
+				self.probabilities[feature_hash] = normalized_probability
 
 		self.convert_probabilities()
 
@@ -165,7 +175,7 @@ class DiscreteProbabilities():
 		self.n_features = len(self.probabilities_array)
 
 class TopologyProbabilities(DiscreteProbabilities):
-	def probabilities_from_ccs(self, cc_probabilities):
+	def probabilities_from_ccs(self, cc_sets):
 		topology_sample = TopologySample(self.data_array)
 
 		for i in range(self.n_features):
@@ -178,13 +188,19 @@ class TopologyProbabilities(DiscreteProbabilities):
 
 				n_node_taxa = clade_size(parent_hash)
 				if n_node_taxa >= 3: # conditional clade
-					split_probability = cc_probabilities[parent_hash].probabilities[split_hash]
+					split_probability = cc_sets[parent_hash].probabilities[split_hash]
 					node_probabilities.append(split_probability)
 
 			topology_probability = numpy.prod(node_probabilities)
 			self.probabilities[topology_hash] = topology_probability
 
 		self.convert_probabilities()
+
+	def add_clade_support(self, clade_set):
+		pass
+
+	def add_consensus_heights(self):
+		pass
 
 # read a nexus or newick format file containing phylogenetic trees
 # if the file does not begin with a nexus header, assumes it is a newick file
@@ -304,7 +320,6 @@ def derive_best_topologies(cc_sets, taxon_order, topologies_threshold, probabili
 	candidate_inv_probs = [0.0]
 
 	best_topologies = []
-	best_probabilities = []
 	best_posterior = 0.0
 	while (len(candidate_topologies) > 0) and (len(best_topologies) < topologies_threshold) and (best_posterior < probability_threshold):
 		candidate_topology = candidate_topologies.pop(0)
@@ -314,7 +329,6 @@ def derive_best_topologies(cc_sets, taxon_order, topologies_threshold, probabili
 		if len(candidate_nodes) == 0: # candidate topology is fully resolved
 			candidate_probability = 1.0 - candidate_inv_prob
 			best_topologies.append(candidate_topology)
-			best_probabilities.append(candidate_probability)
 			best_posterior += candidate_probability
 		else: # candidate topology is not fully resolved
 			unresolved_node_index = candidate_nodes[0]
@@ -362,7 +376,6 @@ def derive_best_topologies(cc_sets, taxon_order, topologies_threshold, probabili
 	derived_topology_newick = {}
 	for i in range(len(best_topologies)):
 		topology = best_topologies[i]
-		probability = best_probabilities[i]
 		topology_hash = numpy.sort(topology["f0"]).tostring()
 
 		splits = {}
@@ -375,10 +388,11 @@ def derive_best_topologies(cc_sets, taxon_order, topologies_threshold, probabili
 		derive_tree_from_splits(tree_model, root_hash, taxon_order, splits)
 		newick = tree_model.write(format = 9)
 
-		derived_topology_probabilities[topology_hash] = probability
 		derived_topology_newick[topology_hash] = newick
 
-	return derived_topology_probabilities, derived_topology_newick
+	derived_topologies = TopologyProbabilities(derived_topology_newick)
+
+	return derived_topologies
 
 def calculate_root_hash(n_taxa):
 	root_hash_bits = numpy.ones(n_taxa, dtype = numpy.uint8)
@@ -467,83 +481,9 @@ def clade_taxon_names(clade_hash, taxon_order):
 
 	return taxon_names
 
-def reverse_cc_probabilities(cc_probabilities):
-	reverse_ccp = {}
-	for parent_id in cc_probabilities:
-		for split_id in cc_probabilities[parent_id]:
-			cc_probability = cc_probabilities[parent_id][split_id]
-			child1_hash, child2_hash = elucidate_cc_split(parent_id, split_id)
-
-			if child1_hash in reverse_ccp:
-				reverse_ccp[child1_hash][parent_id] = cc_probability
-			else:
-				reverse_ccp[child1_hash] = {parent_id: cc_probability}
-
-			if child2_hash in reverse_ccp:
-				reverse_ccp[child2_hash][parent_id] = cc_probability
-			else:
-				reverse_ccp[child2_hash] = {parent_id: cc_probability}
-
-	return reverse_ccp
-
-def derive_clade_probabilities(clade_id, n_taxa, reverse_ccp):
-	n_bytes, remainder = divmod(n_taxa, 8)
-	if remainder > 0:
-		n_bytes += 1
-
-	derived_struct_format = "a%d,f8" % (n_bytes)
-
-	root_hash = calculate_root_hash(n_taxa)
-
-	target_clade = numpy.array([(clade_id, 1.0)], dtype=derived_struct_format)
-	paths_to_root = [target_clade]
-
-	target_clade_probability = 0.0
-	while len(paths_to_root) > 0:
-		incomplete_path = paths_to_root.pop(0)
-		incomplete_path_head = incomplete_path[0]
-		incomplete_path_hash = incomplete_path_head["f0"].tostring()
-		possible_parents = reverse_ccp[incomplete_path_hash]
-
-		for parent_hash in possible_parents:
-			split_probability = possible_parents[parent_hash]
-			if split_probability > 0.0:
-				parent_row = numpy.array([(parent_hash, split_probability)], dtype=derived_struct_format)
-				new_path = numpy.concatenate((parent_row, incomplete_path))
-
-				if parent_hash == root_hash:
-					path_probability = numpy.prod(new_path["f1"])
-					target_clade_probability += path_probability
-				else:
-					paths_to_root.append(new_path)
-
-	return target_clade_probability
-
-def add_derived_probabilities(newick_strings, taxon_order, ccp):
+def nonzero_derived_topologies(cc_sets, taxon_order):
 	n_taxa = len(taxon_order)
-	reverse_ccp = reverse_cc_probabilities(ccp)
-
-	annotated_topologies = {}
-	for topology_hash, topology_newick in newick_strings.items():
-		root_node = ete2.Tree(topology_newick)
-		for node in root_node.get_descendants():
-			if not node.is_leaf():
-				child1, child2 = node.get_children()
-				child1_clade = set(child1.get_leaf_names())
-				child2_clade = set(child2.get_leaf_names())
-
-				parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, taxon_order)
-				clade_probability = derive_clade_probabilities(parent_id, n_taxa, reverse_ccp)
-				node.support = clade_probability
-
-		annotated_newick = root_node.write(format = 2)
-		annotated_topologies[topology_hash] = annotated_newick
-
-	return annotated_topologies
-
-def nonzero_derived_topologies(ccp, taxon_order):
-	n_taxa = len(taxon_order)
-	reverse_ccp = reverse_cc_probabilities(ccp)
+	reverse_ccp = reverse_cc_probabilities(cc_sets)
 	clades_by_size = []
 	n_subtrees = {}
 
@@ -579,3 +519,83 @@ def nonzero_derived_topologies(ccp, taxon_order):
 	n_root_topologies = n_subtrees[root_id]
 
 	return n_root_topologies
+
+def derive_clade_probabilities(cc_sets):
+	clade_probability_cache = {}
+
+	n_taxa = len(taxon_order)
+	reverse_ccp = reverse_cc_probabilities(cc_sets)
+
+	new_newick_strings = []
+	for i in range(self.n_features):
+		topology_newick = self.data_array[i].tostring()
+		root_node = ete2.Tree(topology_newick)
+		for node in root_node.get_descendants():
+			if not node.is_leaf():
+				child1, child2 = node.get_children()
+				child1_clade = set(child1.get_leaf_names())
+				child2_clade = set(child2.get_leaf_names())
+
+				parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, taxon_order)
+
+				if parent_id not in clade_probability_cache:
+					clade_probability = derive_single_clade_probability(parent_id, n_taxa, reverse_ccp)
+					clade_probability_cache[parent_id] = {split_id: clade_probability}
+				elif split_id not in clade_probability_cache[parent_id]:
+					clade_probability = derive_single_clade_probability(parent_id, n_taxa, reverse_ccp)
+					clade_probability_cache[parent_id][split_id] = clade_probability
+
+def derive_single_clade_probability(clade_id, n_taxa, reverse_ccp):
+	n_bytes, remainder = divmod(n_taxa, 8)
+	if remainder > 0:
+		n_bytes += 1
+
+	derived_struct_format = "a%d,f8" % (n_bytes)
+
+	root_hash = calculate_root_hash(n_taxa)
+
+	target_clade = numpy.array([(clade_id, 1.0)], dtype=derived_struct_format)
+	paths_to_root = [target_clade]
+
+	target_clade_probability = 0.0
+	while len(paths_to_root) > 0:
+		incomplete_path = paths_to_root.pop(0)
+		incomplete_path_head = incomplete_path[0]
+		incomplete_path_hash = incomplete_path_head["f0"].tostring()
+		possible_parents = reverse_ccp[incomplete_path_hash]
+
+		for parent_hash in possible_parents:
+			split_probability = possible_parents[parent_hash]
+			if split_probability > 0.0:
+				parent_row = numpy.array([(parent_hash, split_probability)], dtype=derived_struct_format)
+				new_path = numpy.concatenate((parent_row, incomplete_path))
+
+				if parent_hash == root_hash:
+					path_probability = numpy.prod(new_path["f1"])
+					target_clade_probability += path_probability
+				else:
+					paths_to_root.append(new_path)
+
+	return target_clade_probability
+
+def melt_clade_probabilities(topology_set):
+	pass
+
+def reverse_cc_probabilities(cc_sets):
+	reverse_ccp = {}
+	for parent_id in cc_sets:
+		for split_id in cc_sets[parent_id].probabilities:
+			cc_probability = cc_sets[parent_id].probabilities[split_id]
+			child1_hash, child2_hash = elucidate_cc_split(parent_id, split_id)
+
+			if child1_hash in reverse_ccp:
+				reverse_ccp[child1_hash][parent_id] = cc_probability
+			else:
+				reverse_ccp[child1_hash] = {parent_id: cc_probability}
+
+			if child2_hash in reverse_ccp:
+				reverse_ccp[child2_hash][parent_id] = cc_probability
+			else:
+				reverse_ccp[child2_hash] = {parent_id: cc_probability}
+
+	return reverse_ccp

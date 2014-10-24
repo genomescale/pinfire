@@ -5,50 +5,72 @@ import argparse
 import os
 import csv
 
+def safe_open(file_path, overwrite):
+	if (overwrite == False) and os.path.exists(file_path):
+		if os.path.isfile:
+			raise Exception("This file already exists: " + file_path)
+		elif os.path.isfolder:
+			raise Exception("Please specify full paths including file names. This path is a folder: " + file_path)
+		else:
+			raise Exception()
+	
+	safe_open_file = open(file_path, "w")
+
+	return safe_open_file
+
 arg_parser = argparse.ArgumentParser(description = "SCCULS: Scalable Conditional-Clade Ultrametric Summary trees. Produces an annotate summary tree from an MCMC sample, using the highest tree probability calculated from conditional clade frequencies, or from topology frequencies.")
 arg_parser.add_argument("-v", "--version", action = "version", version = PROGRAM_VERSION)
 
 defaults_group = arg_parser.add_argument_group("program defaults")
-defaults_group.add_argument("-c", "--candidate-method", type = str, default = "derived", choices = ["sampled", "derived"], help = "Only consider topologies in the MCMC sample, or derive the most probable topology or topologies using conditional clades. Default: derived.")
-defaults_group.add_argument("-e", "--node-heights", type = str, choices = ["median", "mean"], help = "Specify the method used to calculate node heights. Without this option, node heights will not be calculated, and trees of equal branch lengths will be returned.")
-defaults_group.add_argument("-p", "--probability-method", type = str, choices = ["tree-topology", "conditional-clade"], help = "When candidate method is 'sampled', infer clade and tree topology probabilities using either tree topology frequencies or conditional clade frequencies. Default: conditional-clade.")
-defaults_group.add_argument("-u", "--support-values", type = str, default = "clade", choices = ["clade", "conditional-clade", "both"], help = "The type of support values added to summary tree nodes: clade monophyly probabilities, or conditional clade probabilities, or both. Default: both.")
+defaults_group.add_argument("-c", "--candidate-method", type = str, default = "derived", choices = ["derived", "sampled"], help = "Only consider topologies in the MCMC sample, or derive the most probable topology or topologies using conditional clades. Default: derived.")
+#defaults_group.add_argument("-n", "--node-heights", type = str, choices = ["median", "mean"], help = "Specify the method used to calculate node heights. Without this option, node heights will not be calculated, and trees of equal branch lengths will be returned.")
+defaults_group.add_argument("-p", "--probability-method", type = str, choices = ["conditional-clade", "tree-topology"], help = "Infer tree topology probabilities using either tree topology frequencies or conditional clade frequencies. When -c/--candidate-method is 'sampled', default is tree-topology. When -c/--candidate-method is 'derived', default is conditional-clade.")
+defaults_group.add_argument("-s", "--support-values", type = str, choices = ["conditional-clade", "tree-topology"], help = "Add clade monophyly support values to output trees, and infer them using either tree topology probabilities or conditional clade frequencies.")
+defaults_group.add_argument("-r", "--overwrite", action = "store_true", help = "If output file paths are alreading existing files, overwrite them with new output.")
 
 output_group = arg_parser.add_argument_group('output files')
-output_group.add_argument("-n", "--newick-output", metavar = "NEWICK_OUTPUT_PATH", type = str, help = "Output the summary tree(s) in newick format. When --max-topologies is greater than 1, more than one tree may be returned, so an identifying number will be appended to the end of each filename.")
-output_group.add_argument("-o", "--csv-output", metavar = "CSV_OUTPUT_PATH", type = str, help = "Calculate statistics for each returned tree topology, and output them to a file in CSV format.")
-output_group.add_argument("-a", "--text-output", metavar = "TEXT_OUTPUT_PATH", type = str, help = "Calculate the number of topologies or conditional clades with non-zero probability, and the number of possible topologies or conditional clades for the number of taxa.")
+output_group.add_argument("-i", "--info-output", metavar = "INFO_OUTPUT_PATH", type = str, help = "Calculate whole-sample statistics and output them to a text format file.")
+output_group.add_argument("-o", "--csv-output", metavar = "CSV_OUTPUT_PATH", type = str, help = "Calculate statistics for each returned tree topology, and output them to CSV format file.")
+output_group.add_argument("-w", "--newick-output", metavar = "NEWICK_OUTPUT_PATH", type = str, help = "Output the summary tree(s) to newick format file(s). When -l/--max-topologies is greater than 1, more than one tree may be returned, so an identifying number will be appended to the end of each filename.")
 
 limits_group = arg_parser.add_argument_group('output limits')
-limits_group.add_argument("-m", "--max-probability", type = float, default = 1.0, help = "The size of the credible set in total posterior probability to output. The number of topologies returned will still be limited by -t/--max-topologies. Default: 1.0")
-limits_group.add_argument("-t", "--max-topologies", type = int, default = 1, help = "The size of the credible set in the number of unique topologies to output. The number of topologies returned will still be limited by -m/--max-probability. Default: 1.")
+limits_group.add_argument("-l", "--max-topologies", type = int, default = 1, help = "The size of the credible set in the number of unique topologies to output. The number of topologies returned will still be limited by -m/--max-probability. Default: 1.")
+limits_group.add_argument("-m", "--max-probability", type = float, default = 1.0, help = "The size of the credible set in total posterior probability to output. The number of topologies returned will still be limited by -l/--max-topologies. Default: 1.0")
 
 input_group = arg_parser.add_argument_group('program input')
 input_group.add_argument("-b", "--burn-in", type = int, default = 0, help = "The number of trees to discard from the beginning of the MCMC sample. Default: 0.")
 input_group.add_argument("-d", "--calibration-date", type = float, default = 0.0, help = "If any tip dates are not contemporary (including tip date sampling), set a fixed date for the calibration taxon so that the tree height is correctly calculated. Negative numbers are used for past dates, positive numbers for future dates. Default: 0.0.")
-input_group.add_argument("-x", "--calibration-taxon", type = str, default = "", help = "If any tip dates are not contemporary (including tip date sampling), set the calibration taxon so that the tree height is correctly calculated.")
+input_group.add_argument("-t", "--calibration-taxon", type = str, default = "", help = "If any tip dates are not contemporary (including tip date sampling), set the calibration taxon so that the tree height is correctly calculated.")
 input_group.add_argument("sample_path", metavar = "MCMC_SAMPLE_PATH", type = str, help = "The path to an MCMC sample of phylogenetic trees in either nexus or newick format.")
 
 args = arg_parser.parse_args()
 
 # raise errors in response to incomplete or nonsensical user-supplied arguments
-if args.probability_method is None and args.candidate_method == "sampled":
-	arg_parser.error("argument -p/--probability-method is required when -c/--candidate-method is 'sampled'")
-elif args.probability_method is not None and args.candidate_method == "derived":
-	arg_parser.error("argument -p/--probability-method must not be used when -c/--candidate-method is 'derived'")
-elif args.max_topologies <= 0:
-	arg_parser.error("argument -t/--max-topologies: must be equal to or greater than 1")
+if args.max_topologies <= 0:
+	arg_parser.error("argument -l/--max-topologies: must be equal to or greater than 1")
 elif args.max_probability <= 0.0 or args.max_probability > 1.0:
 	arg_parser.error("argument -m/--max-probability: must be greater than 0.0 and less than 1.0")
 elif not os.path.isfile(args.sample_path):
 	arg_parser.error("argument MCMC_SAMPLE_PATH: not a file path")
 
-print "Reading MCMC sample..."
+# set default probability method
+if args.probability_method is None:
+	if args.candidate_method == "derived":
+		probability_method = "conditional-clade"
+	else:
+		probability_method = "tree-topology"
+else:
+	probability_method = args.probability_method
+
 calibration_taxon = args.calibration_taxon
 calibration_date = args.calibration_date
 sample_path = args.sample_path
 sample_burn_in = args.burn_in
+max_tree_topologies = args.max_topologies
+max_probability = args.max_probability
+overwrite = args.overwrite
 
+print "Reading MCMC sample..."
 mcmc_sample = libscculs.trees_from_path(sample_path)
 mcmc_post = mcmc_sample[sample_burn_in:] # discard burn-in
 ultrametric_sample = libscculs.UltrametricSample(mcmc_post, calibration_taxon, calibration_date)
@@ -56,41 +78,61 @@ taxon_order = ultrametric_sample.taxon_order
 
 print("Counting topologies and conditional clades...")
 topology_set, topology_counts, cc_sets, cc_counts = libscculs.calculate_topology_probabilities(ultrametric_sample)
+n_unique_topologies = topology_set.n_features
 
-max_tree_topologies = args.max_topologies
-max_probability = args.max_probability
-
-if args.probability_method == "conditional-clade" or args.candidate_method == "derived":
+# all circumstances where conditional clade probabilities are required
+# don't bother to calculate if not needed
+if (args.candidate_method == "derived") or (probability_method == "conditional-clade") or (args.support_values == "conditional-clade"):
 	print("Calculating conditional clade probabilities...")
 	for parent_hash, split_counts in cc_counts.items():
 		cc_sets[parent_hash].probabilities_from_counts(split_counts)
 
-if args.candidate_method == "sampled":
-	if args.probability_method == "tree-topology":
-		print("Calculating topology probabilities...")
+if args.support_values is not None:
+	if args.support_values == "tree-topology": # infer clade support values using tree topology probabilities
 		topology_set.probabilities_from_counts(topology_counts)
-	else:
-		print("Calculating topology probabilities from conditional clade probabilities...")
-		topology_set.probabilities_from_ccs(cc_sets)
+		clade_set = melt_clade_probabilities(topology_set)
+	else: # infer clade support values using conditional clade probabilities
+		clade_set = derive_clade_probabilities(cc_sets)
 
-	topology_set.cull_probabilities(max_tree_topologies, max_probability)
-	output_topology_set = topology_set
-else:
+	output_topology_set.add_clade_support(clade_set)
+
+if args.candidate_method == "derived": # derive credible topologies based on conditional clade probabilities
 	print("Deriving probable topologies from conditional clades...")
 	output_topology_set = libscculs.derive_best_topologies(cc_sets, taxon_order, max_tree_topologies, max_probability)
+else: # credible probable topologies based on topology frequencies
+	topology_set.cull_probabilities(max_tree_topologies, max_probability)
+	output_topology_set = topology_set
+
+if probability_method == "conditional-clade":
+	print("Calculating topology probabilities from conditional clade probabilities...")
+	output_topology_set.probabilities_from_ccs(cc_sets)
+else:
+	print("Calculating topology probabilities...")
+	output_topology_set.probabilities_from_counts(topology_counts)
+
+if args.info_output is not None:
+	info_output_path = args.info_output
+	info_output_file = safe_open(info_output_path, overwrite)
+	info_output_file.write("Number of unique tree topologies in MCMC sample: " + str(n_unique_topologies))
+
+	if args.candidate_method == "derived": # calculate summary statistics for topologies
+		n_derived_topologies = libscculs.nonzero_derived_topologies(cc_sets, taxon_order)
+		info_output_file.write("Number of topologies with non-zero derived probabilities: " + str(n_derived_topologies))
+
+	info_output_file.close()
 
 if args.newick_output is not None:
 	newick_path_prefix = args.newick_output
 	for i in range(output_topology_set.n_features):
 		newick_string = output_topology_set.data_array[i]
 		newick_output_path = newick_path_prefix + "." + str(i)
-		newick_output_file = open(newick_output_path, "w")
+		newick_output_file = safe_open(newick_output_path, overwrite)
 		newick_output_file.write(newick_string + "\n")
 		newick_output_file.close()
 
 if args.csv_output is not None:
 	csv_output_path = args.csv_output
-	csv_output_file = open(csv_output_path, "w")
+	csv_output_file = safe_open(csv_output_path, overwrite)
 	csv_writer = csv.writer(csv_output_file)
 
 	header_row = ["topology", "probability"]
@@ -102,9 +144,3 @@ if args.csv_output is not None:
 		csv_writer.writerow(output_row)
 
 	csv_output_file.close()
-
-if args.text_output is not None:
-	if args.candidate_method == "sampled": # calculate summary statistics for topologies
-		pass
-	else: # calculate summary statistics for conditional clades
-		pass
