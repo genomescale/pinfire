@@ -49,7 +49,7 @@ class TopologySample():
 			self.recurse_node_properties(child1, topology_values)
 			self.recurse_node_properties(child2, topology_values)
 
-			parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, self.taxon_order)
+			parent_id, split_id = calculate_node_hashes(child1_clade, child2_clade, self.taxon_order)
 			topology_values.append((parent_id, split_id))
 
 class UltrametricSample(TopologySample):
@@ -105,7 +105,7 @@ class UltrametricSample(TopologySample):
 			self.recurse_node_properties(child1, child1_height, tree_values)
 			self.recurse_node_properties(child2, child2_height, tree_values)
 
-			parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, self.taxon_order)
+			parent_id, split_id = calculate_node_hashes(child1_clade, child2_clade, self.taxon_order)
 			tree_values.append((parent_id, split_id, node_height))
 
 class DiscreteProbabilities():
@@ -116,34 +116,40 @@ class DiscreteProbabilities():
 
 		sorted_data = [data[feature_hash] for feature_hash in self.hashes_array]
 		self.data_array = numpy.array(sorted_data)
+
 		self.probabilities = {}
-		self.probabilities_array = numpy.zeros(self.n_features, dtype = numpy.float64)
+		for feature_hash in sorted_hashes:
+			self.probabilities[feature_hash] = 0.0
+
+		self.convert_probabilities()
+
+	def add_probabilities(self, probabilities):
+		for feature in self.hashes_array:
+			feature_hash = feature.tostring()
+			self.probabilities[feature_hash] = probabilities[feature_hash]
+
+		self.convert_probabilities()
 
 	def probabilities_from_counts(self, counts):
-		sorted_counts = []
-		for feature_hash in self.hashes_array:
-			if feature_hash in counts:
-				sorted_counts.append(counts[feature_hash])
-			else:
-				sorted_counts.append(0)
-
-		counts_array = numpy.array(sorted_counts, dtype = numpy.uint64)
-
 		log_counts = {}
-		for i in range(self.n_features):
-			feature_hash  = self.hashes_array[i]
-			feature_count = counts_array[i]
+		all_log_counts = []
 
-			if feature_counts == 0:
-				self.probabilities[feature_hash] = 0.0
-			else:
-				log_counts[feature_hash] = math.log(feature_count)
+		for count_hash, count in counts.items():
+			log_count = math.log(count)
+			log_counts[count_hash] = log_count
+			all_log_counts.append(log_count)
 
-		if len(log_counts) > 0:
-			log_sum_of_counts = numpy.logaddexp.reduce(log_counts.values())
-			for feature_hash in log_counts:
+		if len(all_log_counts) > 0:
+			log_sum_of_counts = numpy.logaddexp.reduce(all_log_counts)
+		else:
+			log_sum_of_counts = None
+
+		for feature_hash in self.hashes_array:
+			if feature_hash in log_counts:
 				normalized_probability = math.exp(log_counts[feature_hash] - log_sum_of_counts)
 				self.probabilities[feature_hash] = normalized_probability
+			else:
+				self.probabilities[feature_hash] = 0.0
 
 		self.convert_probabilities()
 
@@ -161,7 +167,7 @@ class DiscreteProbabilities():
 		cull_indices = []
 		for i in topology_descending_order:
 			if (posterior_features >= max_features) or (posterior_probability >= max_probability):
-				cull_hash = self.hashes_array[i]
+				cull_hash = self.hashes_array[i].tostring()
 				self.probabilities.pop(cull_hash)
 				cull_indices.append(i)
 
@@ -196,11 +202,80 @@ class TopologyProbabilities(DiscreteProbabilities):
 
 		self.convert_probabilities()
 
-	def add_clade_support(self, clade_set):
-		pass
+	def add_clade_support(self, clade_set, taxon_order):
+		topologies_with_support = []
+		for topology_newick in self.data_array:
+			root_node = ete2.Tree(topology_newick)
+			for node in root_node.get_descendants():
+				if not node.is_leaf():
+					child1, child2 = node.get_children()
+					child1_clade = set(child1.get_leaf_names())
+					child2_clade = set(child2.get_leaf_names())
+
+					clade_hash, split_hash = calculate_node_hashes(child1_clade, child2_clade, taxon_order)
+					clade_hash = clade_hash.rstrip("\x00")
+					split_hash = clade_hash.rstrip("\x00")
+
+					clade_probability = clade_set.probabilities[clade_hash]
+					node.support = clade_probability
+
+			newick_with_support = root_node.write(format = 2)
+			topologies_with_support.append(newick_with_support)
+
+		self.data_array = numpy.array(topologies_with_support)
 
 	def add_consensus_heights(self):
 		pass
+
+class CladeProbabilities(DiscreteProbabilities):
+	def derive_clade_probabilities(self, cc_sets, n_taxa):
+		reverse_ccp = reverse_cc_probabilities(cc_sets)
+		root_hash = calculate_root_hash(n_taxa)
+		self.probabilities[root_hash] = 1.0
+
+		clades_by_size = []
+		for i in range(n_taxa - 1):
+			clades_by_size.append(set())
+
+		for i in range(self.n_features):
+			clade_hash = self.hashes_array[i]
+			n_clade_taxa = self.data_array[i]
+			clades_by_size[n_taxa - n_clade_taxa].add(clade_hash)
+
+		# iterate through clades from largest to smallest (in number of taxa)
+		for i in range(1, n_taxa - 1): # skip the root hash
+			for clade_hash in clades_by_size[i]:
+				# there may be multiple paths from any clade to the root, so the sum of path probabilities is required
+				# as clades can only be children of larger parents, by calculating probabilities of larger clades first,
+				# the conditional probability of the clade of interest may be multiplied by the parent clade probability
+				# which is the sum of path probabilities from the parent to the root
+				clade_probability = 0.0
+				conditional_parents = reverse_ccp[clade_hash]
+				for parent_hash in conditional_parents:
+					# the product of conditional clade probabilities which link a clade to the root of the tree
+					path_probability = conditional_parents[parent_hash] * self.probabilities[parent_hash]
+					clade_probability += path_probability
+
+				self.probabilities[clade_hash] = clade_probability
+
+		self.convert_probabilities()
+
+	def melt_clade_probabilities(self, topology_set, n_taxa):
+		root_hash = calculate_root_hash(n_taxa)
+		n_bytes = len(root_hash) # maximum number of bytes required to store clade hashes
+		clade_dtype = "a" + str(n_bytes)
+
+		clade_probability_cache = {}
+		for i in range(topology_set.n_features):
+			topology_hash = topology_set.hashes_array[i]
+			topology_probability = topology_set.probabilities_array[i]
+
+			topology_char_array = numpy.array(list(topology_hash))
+			clades_array = topology_char_array.view(clade_dtype)
+			for clade_hash in clades_array:
+				self.probabilities[clade_hash] += topology_probability
+
+		self.convert_probabilities()
 
 # read a nexus or newick format file containing phylogenetic trees
 # if the file does not begin with a nexus header, assumes it is a newick file
@@ -224,7 +299,7 @@ def trees_from_path(trees_filepath):
 	newick_strings = newick_blob.strip().split("\n")
 	return newick_strings
 
-def calculate_node_ids(children_a, children_b, taxon_order):
+def calculate_node_hashes(children_a, children_b, taxon_order):
 	n_taxa = len(taxon_order)
 	children = set.union(children_a, children_b)
 
@@ -268,6 +343,7 @@ def calculate_topology_probabilities(ts):
 	topology_data = {}
 	cc_counts = {}
 	cc_data = {}
+	clade_sizes = {}
 
 	for i in range(ts.n_trees):
 		tree_array = ts.tree_arrays[i]
@@ -288,6 +364,7 @@ def calculate_topology_probabilities(ts):
 			split_hash = node[1].tostring() # the hash for the bifurcation
 
 			n_node_taxa = clade_size(parent_hash)
+			clade_sizes[parent_hash] = n_node_taxa
 			if n_node_taxa >= 3: # record conditional clade
 				if parent_hash not in cc_counts:
 					cc_data[parent_hash] = {split_hash: node}
@@ -298,13 +375,14 @@ def calculate_topology_probabilities(ts):
 				else:
 					cc_counts[parent_hash][split_hash] += 1
 
+	clades_set = CladeProbabilities(clade_sizes)
 	topology_set = TopologyProbabilities(topology_data)
 
 	cc_sets = {}
 	for parent_hash, splits_data in cc_data.items():
 		cc_sets[parent_hash] = DiscreteProbabilities(splits_data)
 
-	return topology_set, topology_counts, cc_sets, cc_counts
+	return topology_set, topology_counts, cc_sets, cc_counts, clades_set
 
 def derive_best_topologies(cc_sets, taxon_order, topologies_threshold, probability_threshold):
 	cherry_hash = "\x80"
@@ -481,8 +559,7 @@ def clade_taxon_names(clade_hash, taxon_order):
 
 	return taxon_names
 
-def nonzero_derived_topologies(cc_sets, taxon_order):
-	n_taxa = len(taxon_order)
+def n_derived_topologies(cc_sets, n_taxa, include_zero_probability = False):
 	reverse_ccp = reverse_cc_probabilities(cc_sets)
 	clades_by_size = []
 	n_subtrees = {}
@@ -490,96 +567,38 @@ def nonzero_derived_topologies(cc_sets, taxon_order):
 	for i in range(n_taxa - 2):
 		clades_by_size.append(set())
 
-	for parent_id in ccp:
-		parent_size = clade_size(parent_id)
-		if parent_size > 2:
-			clades_by_size[parent_size - 3].add(parent_id)
+	for clade_hash in cc_sets:
+		n_clade_taxa = clade_size(clade_hash)
+		if n_clade_taxa >= 3:
+			clades_by_size[n_clade_taxa - 3].add(clade_hash)
 
 	for i in range(n_taxa - 2):
-		for parent_id in clades_by_size[i]:
+		for parent_hash in clades_by_size[i]:
+			parent_splits = cc_sets[parent_hash]
 			n_parent_subtrees = 0
-			for split_id in ccp[parent_id]:
-				if ccp[parent_id][split_id] > 0.0:
-					child1_id, child2_id = elucidate_cc_split(parent_id, split_id)
+			for j in range(parent_splits.n_features):
+				split_hash = parent_splits.hashes_array[j]
+				split_probability = parent_splits.probabilities_array[j]
+				if include_zero_probability or (split_probability > 0.0):
+					child1_hash, child2_hash = elucidate_cc_split(parent_hash, split_hash)
 
 					n_split_subtrees = 1
-					child1_size = clade_size(child1_id)
+					child1_size = clade_size(child1_hash)
 					if child1_size > 2:
-						n_split_subtrees = n_split_subtrees * n_subtrees[child1_id]
+						n_split_subtrees = n_split_subtrees * n_subtrees[child1_hash]
 
-					child2_size = clade_size(child2_id)
+					child2_size = clade_size(child2_hash)
 					if child2_size > 2:
-						n_split_subtrees = n_split_subtrees * n_subtrees[child2_id]
+						n_split_subtrees = n_split_subtrees * n_subtrees[child2_hash]
 
 					n_parent_subtrees += n_split_subtrees
 
-			n_subtrees[parent_id] = n_parent_subtrees
+			n_subtrees[parent_hash] = n_parent_subtrees
 
 	root_id = calculate_root_hash(n_taxa)
 	n_root_topologies = n_subtrees[root_id]
 
 	return n_root_topologies
-
-def derive_clade_probabilities(cc_sets):
-	clade_probability_cache = {}
-
-	n_taxa = len(taxon_order)
-	reverse_ccp = reverse_cc_probabilities(cc_sets)
-
-	new_newick_strings = []
-	for i in range(self.n_features):
-		topology_newick = self.data_array[i].tostring()
-		root_node = ete2.Tree(topology_newick)
-		for node in root_node.get_descendants():
-			if not node.is_leaf():
-				child1, child2 = node.get_children()
-				child1_clade = set(child1.get_leaf_names())
-				child2_clade = set(child2.get_leaf_names())
-
-				parent_id, split_id = calculate_node_ids(child1_clade, child2_clade, taxon_order)
-
-				if parent_id not in clade_probability_cache:
-					clade_probability = derive_single_clade_probability(parent_id, n_taxa, reverse_ccp)
-					clade_probability_cache[parent_id] = {split_id: clade_probability}
-				elif split_id not in clade_probability_cache[parent_id]:
-					clade_probability = derive_single_clade_probability(parent_id, n_taxa, reverse_ccp)
-					clade_probability_cache[parent_id][split_id] = clade_probability
-
-def derive_single_clade_probability(clade_id, n_taxa, reverse_ccp):
-	n_bytes, remainder = divmod(n_taxa, 8)
-	if remainder > 0:
-		n_bytes += 1
-
-	derived_struct_format = "a%d,f8" % (n_bytes)
-
-	root_hash = calculate_root_hash(n_taxa)
-
-	target_clade = numpy.array([(clade_id, 1.0)], dtype=derived_struct_format)
-	paths_to_root = [target_clade]
-
-	target_clade_probability = 0.0
-	while len(paths_to_root) > 0:
-		incomplete_path = paths_to_root.pop(0)
-		incomplete_path_head = incomplete_path[0]
-		incomplete_path_hash = incomplete_path_head["f0"].tostring()
-		possible_parents = reverse_ccp[incomplete_path_hash]
-
-		for parent_hash in possible_parents:
-			split_probability = possible_parents[parent_hash]
-			if split_probability > 0.0:
-				parent_row = numpy.array([(parent_hash, split_probability)], dtype=derived_struct_format)
-				new_path = numpy.concatenate((parent_row, incomplete_path))
-
-				if parent_hash == root_hash:
-					path_probability = numpy.prod(new_path["f1"])
-					target_clade_probability += path_probability
-				else:
-					paths_to_root.append(new_path)
-
-	return target_clade_probability
-
-def melt_clade_probabilities(topology_set):
-	pass
 
 def reverse_cc_probabilities(cc_sets):
 	reverse_ccp = {}
