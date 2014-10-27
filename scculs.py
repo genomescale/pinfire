@@ -105,11 +105,11 @@ else:
 	output_topology_set.probabilities_from_counts(topology_counts)
 	if not args.no_support_values:
 		print("Calculating topology and clade probabilities from MCMC sample...")
-		topology_set.probabilities_from_counts(topology_counts)
 		clade_set.melt_clade_probabilities(topology_set, n_taxa)
 
-# once probabilities have been calculated for each topology in the sampled set
+# once probabilities have been calculated for each topology & clade in the sampled set
 # then topologies that exceed maximum topology/probability limits can be removed
+# (applied when the probability method is "tree-topology")
 if args.candidate_method == "sampled":
 	print("Limiting output topologies to credible set...")
 	output_topology_set.cull_probabilities(max_tree_topologies, max_probability)
