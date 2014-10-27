@@ -25,7 +25,7 @@ defaults_group = arg_parser.add_argument_group("program defaults")
 defaults_group.add_argument("-c", "--candidate-method", type = str, default = "derived", choices = ["derived", "sampled"], help = "Only consider topologies in the MCMC sample, or derive the most probable topology or topologies using conditional clades. Default: derived.")
 defaults_group.add_argument("-g", "--node-heights", type = str, choices = ["median", "mean"], help = "Specify the method used to calculate node heights. Without this option, node heights will not be calculated, and trees of equal branch lengths will be returned.")
 defaults_group.add_argument("-p", "--probability-method", type = str, choices = ["conditional-clade", "tree-topology"], help = "Infer tree topology probabilities using either tree topology probabilities or conditional clade probabilities. When -c/--candidate-method is 'derived', default is conditional-clade. When -c/--candidate-method is 'sampled', default is tree-topology.")
-defaults_group.add_argument("-s", "--support-values", type = str, choices = ["conditional-clade", "tree-topology"], help = "Add clade monophyly support values to output trees, and infer them using either tree topology frequencies or conditional clade frequencies.")
+defaults_group.add_argument("-s", "--no-support-values", action = "store_true", help = "Do not calculate or add clade monophyly support values to the summary tree(s).")
 
 output_group = arg_parser.add_argument_group('output files')
 output_group.add_argument("-i", "--info-output", metavar = "INFO_OUTPUT_PATH", type = str, help = "Calculate whole-sample statistics and output them to a text format file.")
@@ -88,15 +88,6 @@ if (args.candidate_method == "derived") or (probability_method == "conditional-c
 	for parent_hash, split_counts in cc_counts.items():
 		cc_sets[parent_hash].probabilities_from_counts(split_counts)
 
-# adding tree-topology based support values needs to be done before other steps, in case the topology set is modified later
-if args.support_values == "conditional-clade":
-	print("Calculating clade probabilities from conditional clade probabilities...")
-	clade_set.derive_clade_probabilities(cc_sets, n_taxa)
-elif args.support_values == "tree-topology":
-	print("Calculating topology and clade probabilities from MCMC sample...")
-	topology_set.probabilities_from_counts(topology_counts)
-	clade_set.melt_clade_probabilities(topology_set, n_taxa)
-
 if args.candidate_method == "derived": # derive credible topologies from conditional clades
 	print("Deriving probable topologies from conditional clades...")
 	output_topology_set = libscculs.derive_best_topologies(cc_sets, taxon_order, max_tree_topologies, max_probability)
@@ -106,9 +97,16 @@ else: # base credible topologies on frequency in MCMC sample
 if probability_method == "conditional-clade":
 	print("Calculating topology probabilities from conditional clade probabilities...")
 	output_topology_set.probabilities_from_ccs(cc_sets)
+	if not args.no_support_values:
+		print("Calculating clade probabilities from conditional clade probabilities...")
+		clade_set.derive_clade_probabilities(cc_sets, n_taxa)
 else:
 	print("Calculating topology probabilities...")
 	output_topology_set.probabilities_from_counts(topology_counts)
+	if not args.no_support_values:
+		print("Calculating topology and clade probabilities from MCMC sample...")
+		topology_set.probabilities_from_counts(topology_counts)
+		clade_set.melt_clade_probabilities(topology_set, n_taxa)
 
 # once probabilities have been calculated for each topology in the sampled set
 # then topologies that exceed maximum topology/probability limits can be removed
@@ -116,7 +114,7 @@ if args.candidate_method == "sampled":
 	print("Limiting output topologies to credible set...")
 	output_topology_set.cull_probabilities(max_tree_topologies, max_probability)
 
-if args.support_values is not None:
+if not args.no_support_values:
 	print("Adding clade support values to tree topologies...")
 	output_topology_set.add_clade_support(clade_set, taxon_order)
 
