@@ -24,7 +24,7 @@ arg_parser.add_argument("-v", "--version", action = "version", version = PROGRAM
 defaults_group = arg_parser.add_argument_group("program defaults")
 defaults_group.add_argument("-c", "--candidate-method", type = str, default = "derived", choices = ["derived", "sampled"], help = "Only consider topologies in the MCMC sample, or derive the most probable topology or topologies using conditional clades. Default: derived.")
 defaults_group.add_argument("-g", "--node-heights", type = str, choices = ["median", "mean"], help = "Specify the method used to calculate node heights. Without this option, node heights will not be calculated, and trees of equal branch lengths will be returned.")
-defaults_group.add_argument("-p", "--probability-method", type = str, choices = ["conditional-clade", "tree-topology"], help = "Infer tree topology probabilities using either tree topology probabilities or conditional clade probabilities. When -c/--candidate-method is 'derived', default is conditional-clade. When -c/--candidate-method is 'sampled', default is tree-topology.")
+defaults_group.add_argument("-p", "--probability-method", type = str, choices = ["conditional-clade", "clade-credibility", "tree-topology"], help = "Infer tree topology probabilities using either tree topology probabilities or conditional clade probabilities. When -c/--candidate-method is 'derived', default is conditional-clade. When -c/--candidate-method is 'sampled', default is tree-topology.")
 defaults_group.add_argument("-s", "--no-support-values", action = "store_true", help = "Do not calculate or add clade monophyly support values to the summary tree(s).")
 
 output_group = arg_parser.add_argument_group('output files')

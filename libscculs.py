@@ -202,6 +202,25 @@ class TopologyProbabilities(DiscreteProbabilities):
 
 		self.convert_probabilities()
 
+	def probabilities_from_clades(self, clades_set):
+		topology_sample = TopologySample(self.data_array)
+
+		for i in range(self.n_features):
+			topology_array = topology_sample.topology_arrays[i]
+			topology_hash = self.hashes_array[i]
+			clade_probabilities = []
+			for node in topology_array:
+				clade_hash = node[0].tostring() # the hash for the clade
+				n_node_taxa = clade_size(clade_hash)
+				if n_node_taxa >= 2: # not a leaf
+					clade_probability = clades_set.probabilities[clade_hash]
+					clade_probabilities.append(clade_probability)
+
+			clade_credibility = numpy.prod(clade_probabilities)
+			self.probabilities[topology_hash] = clade_credibility
+
+		self.convert_probabilities()
+
 	def add_clade_support(self, clade_set, taxon_order):
 		topologies_with_support = []
 		for topology_newick in self.data_array:
@@ -447,8 +466,6 @@ def derive_best_topologies(cc_sets, taxon_order, topologies_threshold, probabili
 					new_candidate_inv_probs.append(new_topology_inv_probability)
 
 			integrate_probability(candidate_inv_probs, candidate_topologies, new_candidate_inv_probs, new_candidate_topologies)
-
-		print(len(candidate_topologies), len(best_topologies), sum([1.0 - p for p in candidate_inv_probs]), best_posterior) # number of candidate and best topologies, total posterior of candidate and best topologies
 
 	derived_topology_probabilities = {}
 	derived_topology_newick = {}
